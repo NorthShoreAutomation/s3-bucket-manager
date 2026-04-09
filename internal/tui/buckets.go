@@ -208,43 +208,50 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 }
 
 func (m bucketsModel) view() string {
-	s := breadcrumbStyle.Render("Dashboard > Buckets") + "\n"
-	s += titleStyle.Render("Buckets") + "\n"
+	tableWidth := colName + colRegion + colStatus + colCount + 6 // 6 = gaps between cols + left pad
+	if m.width > tableWidth {
+		tableWidth = m.width
+	}
+
+	s := breadcrumbStyle.Render("dashboard › buckets") + "\n"
+	s += screenTitleStyle.Render(fmt.Sprintf("Buckets (%d)", len(m.items))) + "\n"
+	s += separator(tableWidth) + "\n"
 
 	if m.message != "" {
-		s += successStyle.Render(m.message) + "\n\n"
+		s += " " + successStyle.Render(m.message) + "\n"
 	}
 
 	switch m.mode {
 	case bucketsCreate:
-		s += "New bucket name:\n"
-		s += m.nameInput.View() + "\n\n"
-		s += helpStyle.Render("enter: create  esc: cancel")
+		s += " New bucket name:\n"
+		s += " " + m.nameInput.View() + "\n\n"
+		s += helpStyle.Render(" enter: create  esc: cancel")
 		return s
 	case bucketsConfirmDelete:
 		if m.cursor < len(m.items) {
-			s += warningStyle.Render(fmt.Sprintf("Delete bucket %q? [y/N]", m.items[m.cursor].name))
+			s += "\n " + warningStyle.Render(fmt.Sprintf("Delete bucket %q? [y/N]", m.items[m.cursor].name))
 		}
 		return s
 	}
 
 	if m.loading {
-		s += fmt.Sprintf("%s Loading buckets...\n", m.spinner.View())
+		s += fmt.Sprintf(" %s Loading buckets...\n", m.spinner.View())
 		return s
 	}
 
 	if len(m.items) == 0 {
-		s += "No buckets found.\n\n"
-		s += helpStyle.Render("[c] Create  [esc] Back")
+		s += " No buckets found.\n\n"
+		s += helpStyle.Render(" [c] Create  [esc] Back")
 		return s
 	}
 
-	// Table header
-	s += fmt.Sprintf("  %-30s %-15s %-10s %s\n",
-		tableHeaderStyle.Render("NAME"),
-		tableHeaderStyle.Render("REGION"),
-		tableHeaderStyle.Render("ACCESS"),
-		tableHeaderStyle.Render("OBJECTS"))
+	// Table header row
+	header := fmt.Sprintf(" %s  %s  %s  %s",
+		pad("NAME", colName),
+		pad("REGION", colRegion),
+		pad("ACCESS", colStatus),
+		padRight("OBJECTS", colCount))
+	s += tableHeaderStyle.Width(tableWidth).Render(header) + "\n"
 
 	visible := m.visibleRows()
 	end := m.offset + visible
@@ -253,27 +260,33 @@ func (m bucketsModel) view() string {
 	}
 
 	if m.offset > 0 {
-		s += helpStyle.Render(fmt.Sprintf("  ... %d more above", m.offset)) + "\n"
+		s += dimStyle.Render(fmt.Sprintf(" ▲ %d more above", m.offset)) + "\n"
 	}
 
 	for i := m.offset; i < end; i++ {
 		b := m.items[i]
-		cursor := "  "
+		name := truncate(b.name, colName)
+		region := pad(b.region, colRegion)
+		count := padRight(formatCount(b.objects), colCount)
+
 		if i == m.cursor {
-			cursor = "> "
+			// Selected row: full-width background highlight
+			badge := accessBadgeSelected(b.isPublic)
+			row := fmt.Sprintf(" %s  %s  %s  %s",
+				pad(name, colName), region, pad(badge, colStatus), count)
+			s += rowSelectedStyle.Width(tableWidth).Render(row) + "\n"
+		} else {
+			badge := accessBadge(b.isPublic)
+			row := fmt.Sprintf(" %s  %s  %s  %s",
+				pad(name, colName), region, pad(badge, colStatus), count)
+			s += rowStyle.Render(row) + "\n"
 		}
-		name := b.name
-		if i == m.cursor {
-			name = selectedStyle.Render(name)
-		}
-		s += fmt.Sprintf("%s%-30s %-15s %-10s %d\n",
-			cursor, name, b.region, accessLabel(b.isPublic), b.objects)
 	}
 
 	if end < len(m.items) {
-		s += helpStyle.Render(fmt.Sprintf("  ... %d more below", len(m.items)-end)) + "\n"
+		s += dimStyle.Render(fmt.Sprintf(" ▼ %d more below", len(m.items)-end)) + "\n"
 	}
 
-	s += "\n" + helpStyle.Render("[c] Create  [d] Delete  [esc] Back")
+	s += "\n" + helpStyle.Render(" [c] Create  [d] Delete  [esc] Back")
 	return s
 }

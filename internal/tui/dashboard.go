@@ -84,33 +84,53 @@ func (d dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 }
 
 func (d dashboardModel) view() string {
-	s := titleStyle.Render("s3m - S3 Bucket Manager") + "\n\n"
-
 	profileText := d.client.Profile
 	if profileText == "" {
 		profileText = "default"
 	}
-	s += fmt.Sprintf("  Profile: %s\n", profileText)
-	s += fmt.Sprintf("  Region:  %s\n", d.client.Region)
-	s += fmt.Sprintf("  Account: %s\n", d.client.Account)
+
+	// Title bar
+	s := screenTitleStyle.Render("s3m") + "\n"
+	w := d.width
+	if w < 60 {
+		w = 60
+	}
+	s += separator(w) + "\n\n"
+
+	// Account info
+	labelStyle := lipgloss.NewStyle().Foreground(colorDim).Width(10)
+	valueStyle := lipgloss.NewStyle().Foreground(colorText)
+	s += " " + labelStyle.Render("Profile") + valueStyle.Render(profileText) + "\n"
+	s += " " + labelStyle.Render("Region") + valueStyle.Render(d.client.Region) + "\n"
+	s += " " + labelStyle.Render("Account") + valueStyle.Render(d.client.Account) + "\n"
 	s += "\n"
 
 	if d.loading {
-		s += fmt.Sprintf("  %s Loading buckets and users...\n", d.spinner.View())
+		s += fmt.Sprintf(" %s Loading buckets and users...\n", d.spinner.View())
 	} else {
 		boxStyle := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorBorder).
 			Padding(1, 3).
-			MarginRight(2)
+			MarginRight(2).
+			Foreground(colorText)
 
-		bucketBox := boxStyle.Render(fmt.Sprintf("Buckets\n  %d", d.bucketCount))
-		userBox := boxStyle.Render(fmt.Sprintf("Users\n  %d", d.userCount))
+		countStyle := lipgloss.NewStyle().
+			Foreground(colorPrimary).
+			Bold(true)
 
-		s += lipgloss.JoinHorizontal(lipgloss.Top, bucketBox, userBox) + "\n"
+		bucketBox := boxStyle.Render(
+			dimStyle.Render("Buckets") + "\n" +
+				countStyle.Render(fmt.Sprintf("  %d", d.bucketCount)))
+		userBox := boxStyle.Render(
+			dimStyle.Render("Users") + "\n" +
+				countStyle.Render(fmt.Sprintf("  %d", d.userCount)))
+
+		s += " " + lipgloss.JoinHorizontal(lipgloss.Top, bucketBox, userBox) + "\n"
 	}
 
 	s += "\n"
-	s += helpStyle.Render("  [b] Buckets  [u] Users  [a] Access  [?] Help  [q] Quit")
+	s += helpStyle.Render(" [b] Buckets  [u] Users  [a] Access  [?] Help  [q] Quit")
 
 	return s
 }
