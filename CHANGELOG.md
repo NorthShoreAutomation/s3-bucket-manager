@@ -21,3 +21,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--json` output flag for all CLI commands
 - `--yes` flag to skip confirmation prompts
 - Plain-language error messages with actionable suggestions
+- Makefile with build, install, test, format, and lint targets

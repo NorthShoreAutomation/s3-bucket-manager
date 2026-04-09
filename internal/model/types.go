@@ -20,7 +20,7 @@ type User struct {
 
 type AccessKey struct {
 	AccessKeyID     string
-	SecretAccessKey  string
+	SecretAccessKey string
 	UserName        string
 	CreateDate      time.Time
 }

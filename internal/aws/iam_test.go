@@ -12,19 +12,19 @@ import (
 
 type mockIAM struct {
 	IAMAPI
-	createUserOutput      *iam.CreateUserOutput
-	createUserErr         error
-	deleteUserErr         error
-	listUsersOutput       *iam.ListUsersOutput
-	tagUserErr            error
-	getUserOutput         *iam.GetUserOutput
-	createAccessKeyOutput *iam.CreateAccessKeyOutput
-	deleteAccessKeyErr    error
-	listAccessKeysOutput  *iam.ListAccessKeysOutput
-	putUserPolicyErr      error
-	deleteUserPolicyErr   error
+	createUserOutput       *iam.CreateUserOutput
+	createUserErr          error
+	deleteUserErr          error
+	listUsersOutput        *iam.ListUsersOutput
+	tagUserErr             error
+	getUserOutput          *iam.GetUserOutput
+	createAccessKeyOutput  *iam.CreateAccessKeyOutput
+	deleteAccessKeyErr     error
+	listAccessKeysOutput   *iam.ListAccessKeysOutput
+	putUserPolicyErr       error
+	deleteUserPolicyErr    error
 	listUserPoliciesOutput *iam.ListUserPoliciesOutput
-	listUserTagsOutput    *iam.ListUserTagsOutput
+	listUserTagsOutput     *iam.ListUserTagsOutput
 }
 
 func (m *mockIAM) CreateUser(ctx context.Context, params *iam.CreateUserInput, optFns ...func(*iam.Options)) (*iam.CreateUserOutput, error) {
