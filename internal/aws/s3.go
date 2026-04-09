@@ -105,15 +105,25 @@ func (c *Client) DeleteBucket(ctx context.Context, name string) error {
 	return nil
 }
 
-// GetBucketObjectCount returns the number of objects in a bucket.
+// GetBucketObjectCount returns the total number of objects in a bucket (paginated).
 func (c *Client) GetBucketObjectCount(ctx context.Context, bucket string) (int64, error) {
-	output, err := c.S3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
-	})
-	if err != nil {
-		return 0, fmt.Errorf("could not count objects in %q: %w", bucket, err)
+	var total int64
+	var continuationToken *string
+	for {
+		output, err := c.S3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucket),
+			ContinuationToken: continuationToken,
+		})
+		if err != nil {
+			return 0, fmt.Errorf("could not count objects in %q: %w", bucket, err)
+		}
+		total += int64(aws.ToInt32(output.KeyCount))
+		if !aws.ToBool(output.IsTruncated) {
+			break
+		}
+		continuationToken = output.NextContinuationToken
 	}
-	return int64(aws.ToInt32(output.KeyCount)), nil
+	return total, nil
 }
 
 // ListPrefixes returns top-level prefixes (folders) in a bucket.

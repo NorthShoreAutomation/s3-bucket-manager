@@ -48,6 +48,7 @@ func (d dashboardModel) init() tea.Cmd {
 				region:   b.Region,
 				isPublic: b.IsPublic,
 				objects:  count,
+				created:  b.CreationDate.Format("2006-01-02"),
 			})
 		}
 		users, _ := d.client.ListManagedUsers(ctx)

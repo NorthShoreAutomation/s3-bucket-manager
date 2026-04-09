@@ -12,14 +12,11 @@ var (
 	colorPageTitle  = lipgloss.Color("#c0caf5") // bright, near-white
 	colorPrimary    = lipgloss.Color("#7aa2f7") // bright blue
 	colorText       = lipgloss.Color("#a9b1d6") // primary text
-	colorSecondary  = lipgloss.Color("#9aa5be") // secondary text (region, counts)
 	colorDim        = lipgloss.Color("#565f89") // dimmed (breadcrumb, private, zero)
 	colorBorder     = lipgloss.Color("#3b4261") // separators, borders
 	colorHeaderBg   = lipgloss.Color("#1f2335") // header row shelf
 	colorSelectBg   = lipgloss.Color("#7aa2f7") // selected row bg
 	colorSelectFg   = lipgloss.Color("#1a1b26") // selected row text
-	colorWarningBg  = lipgloss.Color("#e0af68") // PUBLIC badge bg
-	colorWarningFg  = lipgloss.Color("#1a1b26") // PUBLIC badge text
 	colorSuccess    = lipgloss.Color("#73daca") // green for success messages
 	colorDanger     = lipgloss.Color("#f7768e") // red for errors
 	colorWarningTxt = lipgloss.Color("#e0af68") // warning text
@@ -68,9 +65,6 @@ var (
 				Foreground(colorSelectFg).
 				Bold(true)
 
-	rowDimStyle = lipgloss.NewStyle().
-			Foreground(colorSecondary)
-
 	dimStyle = lipgloss.NewStyle().
 			Foreground(colorDim)
 
@@ -80,39 +74,27 @@ var (
 			Bold(true)
 
 	// Fixed column widths
-	colName   = 40
-	colRegion = 13
-	colStatus = 9
-	colCount  = 8
+	colName    = 38
+	colRegion  = 13
+	colStatus  = 4
+	colCount   = 8
+	colCreated = 12
 )
 
-// --- Status Badges ---
+// --- Status Indicators ---
 
-func accessBadge(public bool) string {
+func accessIcon(public bool) string {
 	if public {
-		return lipgloss.NewStyle().
-			Foreground(colorWarningFg).
-			Background(colorWarningBg).
-			Bold(true).
-			PaddingLeft(1).PaddingRight(1).
-			Render("PUBLIC")
+		return lipgloss.NewStyle().Foreground(colorWarningTxt).Render("\U0001F310") // globe
 	}
-	return dimStyle.Render("private")
+	return dimStyle.Render("\U0001F512") // lock
 }
 
-// accessBadgeSelected renders the badge for the selected row (no bg clash).
-func accessBadgeSelected(public bool) string {
+func accessIconSelected(public bool) string {
 	if public {
-		return lipgloss.NewStyle().
-			Foreground(colorWarningFg).
-			Background(colorWarningBg).
-			Bold(true).
-			PaddingLeft(1).PaddingRight(1).
-			Render("PUBLIC")
+		return lipgloss.NewStyle().Foreground(colorWarningTxt).Render("\U0001F310")
 	}
-	return lipgloss.NewStyle().
-		Foreground(colorSelectFg).
-		Render("private")
+	return lipgloss.NewStyle().Foreground(colorSelectFg).Render("\U0001F512")
 }
 
 // --- Helpers ---
@@ -170,5 +152,5 @@ func separator(width int) string {
 
 // Keep old function name working for other screens during transition
 func accessLabel(public bool) string {
-	return accessBadge(public)
+	return accessIcon(public)
 }

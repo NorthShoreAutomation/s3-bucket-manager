@@ -17,6 +17,7 @@ type bucketItem struct {
 	region   string
 	isPublic bool
 	objects  int64
+	created  string
 }
 
 type bucketsMode int
@@ -208,7 +209,7 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 }
 
 func (m bucketsModel) view() string {
-	tableWidth := colName + colRegion + colStatus + colCount + 6 // 6 = gaps between cols + left pad
+	tableWidth := colName + colRegion + colStatus + colCount + colCreated + 10 // gaps between cols + left pad
 	if m.width > tableWidth {
 		tableWidth = m.width
 	}
@@ -246,11 +247,12 @@ func (m bucketsModel) view() string {
 	}
 
 	// Table header row
-	header := fmt.Sprintf(" %s  %s  %s  %s",
+	header := fmt.Sprintf(" %s  %s  %s  %s  %s",
 		pad("NAME", colName),
 		pad("REGION", colRegion),
-		pad("ACCESS", colStatus),
-		padRight("OBJECTS", colCount))
+		pad("", colStatus),
+		padRight("OBJECTS", colCount),
+		pad("CREATED", colCreated))
 	s += tableHeaderStyle.Width(tableWidth).Render(header) + "\n"
 
 	visible := m.visibleRows()
@@ -268,17 +270,17 @@ func (m bucketsModel) view() string {
 		name := truncate(b.name, colName)
 		region := pad(b.region, colRegion)
 		count := padRight(formatCount(b.objects), colCount)
+		created := pad(b.created, colCreated)
 
 		if i == m.cursor {
-			// Selected row: full-width background highlight
-			badge := accessBadgeSelected(b.isPublic)
-			row := fmt.Sprintf(" %s  %s  %s  %s",
-				pad(name, colName), region, pad(badge, colStatus), count)
+			icon := accessIconSelected(b.isPublic)
+			row := fmt.Sprintf(" %s  %s  %s  %s  %s",
+				pad(name, colName), region, icon, count, created)
 			s += rowSelectedStyle.Width(tableWidth).Render(row) + "\n"
 		} else {
-			badge := accessBadge(b.isPublic)
-			row := fmt.Sprintf(" %s  %s  %s  %s",
-				pad(name, colName), region, pad(badge, colStatus), count)
+			icon := accessIcon(b.isPublic)
+			row := fmt.Sprintf(" %s  %s  %s  %s  %s",
+				pad(name, colName), region, icon, count, created)
 			s += rowStyle.Render(row) + "\n"
 		}
 	}
