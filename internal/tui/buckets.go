@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	awsClient "github.com/dcorbell/s3m/internal/aws"
 )
 
@@ -29,28 +31,34 @@ type bucketsModel struct {
 	client    *awsClient.Client
 	items     []bucketItem
 	cursor    int
+	offset    int // first visible row for scrolling
 	loading   bool
 	width     int
 	height    int
 	mode      bucketsMode
 	nameInput textinput.Model
 	message   string
+	spinner   spinner.Model
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
 	ti := textinput.New()
 	ti.Placeholder = "my-bucket-name"
 	ti.CharLimit = 63
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 	return bucketsModel{
 		client:    client,
 		nameInput: ti,
 		loading:   true,
+		spinner:   sp,
 	}
 }
 
 func (m bucketsModel) init() tea.Cmd {
 	m.loading = true
-	return func() tea.Msg {
+	return tea.Batch(m.spinner.Tick, func() tea.Msg {
 		ctx := context.Background()
 		buckets, err := m.client.ListBuckets(ctx)
 		if err != nil {
@@ -67,7 +75,7 @@ func (m bucketsModel) init() tea.Cmd {
 			}
 		}
 		return bucketsLoadedMsg{buckets: items}
-	}
+	})
 }
 
 func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
@@ -86,6 +94,13 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.mode = bucketsList
 		return m, m.init()
 
+	case spinner.TickMsg:
+		if m.loading {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+
 	case tea.KeyMsg:
 		switch m.mode {
 		case bucketsList:
@@ -99,15 +114,33 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	return m, nil
 }
 
+// visibleRows returns how many bucket rows fit on screen.
+// Accounts for breadcrumb, title, header, help line, and padding.
+func (m bucketsModel) visibleRows() int {
+	overhead := 6 // breadcrumb + title + message + header + blank + help
+	avail := m.height - overhead
+	if avail < 3 {
+		avail = 3
+	}
+	return avail
+}
+
 func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
+			if m.cursor < m.offset {
+				m.offset = m.cursor
+			}
 		}
 	case "down", "j":
 		if m.cursor < len(m.items)-1 {
 			m.cursor++
+			visible := m.visibleRows()
+			if m.cursor >= m.offset+visible {
+				m.offset = m.cursor - visible + 1
+			}
 		}
 	case "c":
 		m.mode = bucketsCreate
@@ -196,7 +229,7 @@ func (m bucketsModel) view() string {
 	}
 
 	if m.loading {
-		s += "Loading buckets...\n"
+		s += fmt.Sprintf("%s Loading buckets...\n", m.spinner.View())
 		return s
 	}
 
@@ -213,7 +246,18 @@ func (m bucketsModel) view() string {
 		tableHeaderStyle.Render("ACCESS"),
 		tableHeaderStyle.Render("OBJECTS"))
 
-	for i, b := range m.items {
+	visible := m.visibleRows()
+	end := m.offset + visible
+	if end > len(m.items) {
+		end = len(m.items)
+	}
+
+	if m.offset > 0 {
+		s += helpStyle.Render(fmt.Sprintf("  ... %d more above", m.offset)) + "\n"
+	}
+
+	for i := m.offset; i < end; i++ {
+		b := m.items[i]
 		cursor := "  "
 		if i == m.cursor {
 			cursor = "> "
@@ -226,13 +270,10 @@ func (m bucketsModel) view() string {
 			cursor, name, b.region, accessLabel(b.isPublic), b.objects)
 	}
 
+	if end < len(m.items) {
+		s += helpStyle.Render(fmt.Sprintf("  ... %d more below", len(m.items)-end)) + "\n"
+	}
+
 	s += "\n" + helpStyle.Render("[c] Create  [d] Delete  [esc] Back")
 	return s
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

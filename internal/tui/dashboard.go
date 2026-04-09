@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	awsClient "github.com/dcorbell/s3m/internal/aws"
@@ -16,6 +17,7 @@ type dashboardModel struct {
 	loading     bool
 	width       int
 	height      int
+	spinner     spinner.Model
 }
 
 type dashboardLoadedMsg struct {
@@ -24,14 +26,18 @@ type dashboardLoadedMsg struct {
 }
 
 func newDashboardModel(client *awsClient.Client) dashboardModel {
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 	return dashboardModel{
 		client:  client,
 		loading: true,
+		spinner: sp,
 	}
 }
 
 func (d dashboardModel) init() tea.Cmd {
-	return func() tea.Msg {
+	return tea.Batch(d.spinner.Tick, func() tea.Msg {
 		ctx := context.Background()
 		buckets, _ := d.client.ListBuckets(ctx)
 		users, _ := d.client.ListManagedUsers(ctx)
@@ -39,7 +45,7 @@ func (d dashboardModel) init() tea.Cmd {
 			bucketCount: len(buckets),
 			userCount:   len(users),
 		}
-	}
+	})
 }
 
 func (d dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
@@ -48,6 +54,13 @@ func (d dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 		d.bucketCount = msg.bucketCount
 		d.userCount = msg.userCount
 		d.loading = false
+		return d, nil
+	case spinner.TickMsg:
+		if d.loading {
+			var cmd tea.Cmd
+			d.spinner, cmd = d.spinner.Update(msg)
+			return d, cmd
+		}
 	}
 	return d, nil
 }
@@ -65,7 +78,7 @@ func (d dashboardModel) view() string {
 	s += "\n"
 
 	if d.loading {
-		s += "  Loading...\n"
+		s += fmt.Sprintf("  %s Loading buckets and users...\n", d.spinner.View())
 	} else {
 		boxStyle := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
