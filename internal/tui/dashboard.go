@@ -21,8 +21,8 @@ type dashboardModel struct {
 }
 
 type dashboardLoadedMsg struct {
-	bucketCount int
-	userCount   int
+	buckets []bucketItem
+	users   []userItem
 }
 
 func newDashboardModel(client *awsClient.Client) dashboardModel {
@@ -40,10 +40,28 @@ func (d dashboardModel) init() tea.Cmd {
 	return tea.Batch(d.spinner.Tick, func() tea.Msg {
 		ctx := context.Background()
 		buckets, _ := d.client.ListBuckets(ctx)
+		var items []bucketItem
+		for _, b := range buckets {
+			count, _ := d.client.GetBucketObjectCount(ctx, b.Name)
+			items = append(items, bucketItem{
+				name:     b.Name,
+				region:   b.Region,
+				isPublic: b.IsPublic,
+				objects:  count,
+			})
+		}
 		users, _ := d.client.ListManagedUsers(ctx)
+		var userItems []userItem
+		for _, u := range users {
+			userItems = append(userItems, userItem{
+				name:     u.Name,
+				keyCount: u.KeyCount,
+				created:  u.CreateDate.Format("2006-01-02"),
+			})
+		}
 		return dashboardLoadedMsg{
-			bucketCount: len(buckets),
-			userCount:   len(users),
+			buckets: items,
+			users:   userItems,
 		}
 	})
 }
@@ -51,8 +69,8 @@ func (d dashboardModel) init() tea.Cmd {
 func (d dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case dashboardLoadedMsg:
-		d.bucketCount = msg.bucketCount
-		d.userCount = msg.userCount
+		d.bucketCount = len(msg.buckets)
+		d.userCount = len(msg.users)
 		d.loading = false
 		return d, nil
 	case spinner.TickMsg:

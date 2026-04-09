@@ -84,6 +84,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+	case dashboardLoadedMsg:
+		// Cache loaded data into sub-models so they don't re-fetch
+		a.buckets.items = msg.buckets
+		a.buckets.loading = false
+		a.users.items = msg.users
+		a.users.loading = false
+
 	case errMsg:
 		a.err = msg.err
 		return a, nil
@@ -170,9 +177,16 @@ func (a App) updateDashboard(msg tea.Msg) (App, tea.Cmd) {
 		switch msg.String() {
 		case "b":
 			a = a.pushScreen(screenBuckets)
+			// Use cached data if available, otherwise fetch
+			if len(a.buckets.items) > 0 {
+				return a, nil
+			}
 			return a, a.buckets.init()
 		case "u":
 			a = a.pushScreen(screenUsers)
+			if len(a.users.items) > 0 {
+				return a, nil
+			}
 			return a, a.users.init()
 		case "a":
 			a = a.pushScreen(screenAccess)
