@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/dcorbell/s3m/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -14,6 +15,9 @@ var rootCmd = &cobra.Command{
 	Use:   "s3m",
 	Short: "Manage S3 buckets, users, and permissions",
 	Long:  "s3m is a TUI and CLI tool for managing AWS S3 buckets, IAM users, credentials, and public/private access.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return tui.Run(profile, region)
+	},
 }
 
 func Execute() error {
