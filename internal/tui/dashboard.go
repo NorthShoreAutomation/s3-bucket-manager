@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -40,18 +41,24 @@ func (d dashboardModel) init() tea.Cmd {
 	return tea.Batch(d.spinner.Tick, func() tea.Msg {
 		ctx := context.Background()
 		buckets, _ := d.client.ListBuckets(ctx)
-		var items []bucketItem
-		for _, b := range buckets {
-			stats, _ := d.client.GetBucketStats(ctx, b.Name)
-			items = append(items, bucketItem{
-				name:      b.Name,
-				region:    b.Region,
-				isPublic:  b.IsPublic,
-				objects:   stats.ObjectCount,
-				sizeBytes: stats.SizeBytes,
-				created:   b.CreationDate.Format("2006-01-02"),
-			})
+		items := make([]bucketItem, len(buckets))
+		var wg sync.WaitGroup
+		for i, b := range buckets {
+			items[i] = bucketItem{
+				name:     b.Name,
+				region:   b.Region,
+				isPublic: b.IsPublic,
+				created:  b.CreationDate.Format("2006-01-02"),
+			}
+			wg.Add(1)
+			go func(idx int, name string) {
+				defer wg.Done()
+				stats, _ := d.client.GetBucketStats(ctx, name)
+				items[idx].objects = stats.ObjectCount
+				items[idx].sizeBytes = stats.SizeBytes
+			}(i, b.Name)
 		}
+		wg.Wait()
 		users, _ := d.client.ListManagedUsers(ctx)
 		var userItems []userItem
 		for _, u := range users {

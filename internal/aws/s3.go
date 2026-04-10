@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,49 +17,53 @@ import (
 )
 
 // ListBuckets returns all S3 buckets with their region and public status.
+// Per-bucket metadata is fetched concurrently for speed.
 func (c *Client) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
 	output, err := c.S3.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		return nil, fmt.Errorf("could not list buckets: %w", err)
 	}
 
-	buckets := make([]model.Bucket, 0, len(output.Buckets))
-	for _, b := range output.Buckets {
-		bucket := model.Bucket{
+	buckets := make([]model.Bucket, len(output.Buckets))
+	var wg sync.WaitGroup
+	for i, b := range output.Buckets {
+		buckets[i] = model.Bucket{
 			Name:         aws.ToString(b.Name),
 			CreationDate: aws.ToTime(b.CreationDate),
 		}
+		wg.Add(1)
+		go func(idx int, name string) {
+			defer wg.Done()
 
-		// Get region
-		locOutput, err := c.S3.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
-			Bucket: b.Name,
-		})
-		if err == nil {
-			region := string(locOutput.LocationConstraint)
-			if region == "" {
-				region = "us-east-1" // us-east-1 returns empty
+			// Get region
+			locOutput, err := c.S3.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+				Bucket: aws.String(name),
+			})
+			if err == nil {
+				region := string(locOutput.LocationConstraint)
+				if region == "" {
+					region = "us-east-1"
+				}
+				buckets[idx].Region = region
 			}
-			bucket.Region = region
-		}
 
-		// Check public access
-		pabOutput, err := c.S3.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
-			Bucket: b.Name,
-		})
-		if err != nil {
-			// No public access block means it could be public
-			bucket.IsPublic = true
-		} else {
-			cfg := pabOutput.PublicAccessBlockConfiguration
-			allBlocked := aws.ToBool(cfg.BlockPublicAcls) &&
-				aws.ToBool(cfg.BlockPublicPolicy) &&
-				aws.ToBool(cfg.IgnorePublicAcls) &&
-				aws.ToBool(cfg.RestrictPublicBuckets)
-			bucket.IsPublic = !allBlocked
-		}
-
-		buckets = append(buckets, bucket)
+			// Check public access
+			pabOutput, err := c.S3.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
+				Bucket: aws.String(name),
+			})
+			if err != nil {
+				buckets[idx].IsPublic = true
+			} else {
+				cfg := pabOutput.PublicAccessBlockConfiguration
+				allBlocked := aws.ToBool(cfg.BlockPublicAcls) &&
+					aws.ToBool(cfg.BlockPublicPolicy) &&
+					aws.ToBool(cfg.IgnorePublicAcls) &&
+					aws.ToBool(cfg.RestrictPublicBuckets)
+				buckets[idx].IsPublic = !allBlocked
+			}
+		}(i, aws.ToString(b.Name))
 	}
+	wg.Wait()
 	return buckets, nil
 }
 
