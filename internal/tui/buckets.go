@@ -634,7 +634,7 @@ func (m bucketsModel) loadPrefixes() tea.Cmd {
 
 func (m bucketsModel) view() string {
 	switch m.mode {
-	case bucketDetail, bucketDetailAddPrefix, bucketDetailConfirm:
+	case bucketDetail, bucketDetailAddPrefix, bucketDetailConfirm, bucketDetailDeleteFolder:
 		return m.viewDetail()
 	default:
 		return m.viewList()
@@ -783,7 +783,11 @@ func (m bucketsModel) viewDetail() string {
 	}
 
 	if m.loading {
-		s += fmt.Sprintf("\n %s Loading...\n", m.spinner.View())
+		if m.deleteProgress != "" {
+			s += fmt.Sprintf("\n %s %s\n", m.spinner.View(), m.deleteProgress)
+		} else {
+			s += fmt.Sprintf("\n %s Loading...\n", m.spinner.View())
+		}
 		return s
 	}
 
