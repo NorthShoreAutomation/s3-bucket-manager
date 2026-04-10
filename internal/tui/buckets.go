@@ -38,6 +38,7 @@ const (
 	bucketDetail                             // viewing a single bucket's details
 	bucketDetailAddPrefix                    // typing a new prefix name
 	bucketDetailConfirm                      // type 'yes' to confirm access change
+	bucketDetailDeleteFolder                 // type 'delete' to confirm folder deletion
 )
 
 type bucketsModel struct {
@@ -66,10 +67,12 @@ type bucketsModel struct {
 	detailMessage string          // status message in detail view
 
 	// File browser fields
-	browsePrefix string                 // current prefix being browsed (empty = root)
-	browseItems  []awsClient.BrowseItem // folders + files at current prefix
-	browseCursor int                    // cursor in browse view
-	browseOffset int                    // scroll offset in browse view
+	browsePrefix    string                 // current prefix being browsed (empty = root)
+	browseItems     []awsClient.BrowseItem // folders + files at current prefix
+	browseCursor    int                    // cursor in browse view
+	browseOffset    int                    // scroll offset in browse view
+	folderDeleteKey string                 // key of folder being deleted
+	folderDeleteCnt int64                  // object count for folder delete confirm
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -177,9 +180,14 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 
 	case prefixesLoadedMsg:
 		m.prefixes = msg.prefixes
-		m.loading = false
 		m.mode = bucketDetail
 		m.detailCursor = 0
+		// If no prefixes, auto-load root contents to show files
+		if len(m.prefixes) == 0 {
+			m.browsePrefix = ""
+			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+		}
+		m.loading = false
 		return m, nil
 
 	case browseLoadedMsg:
@@ -187,6 +195,19 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.loading = false
 		m.browseCursor = 0
 		m.browseOffset = 0
+		return m, nil
+
+	case folderCountedMsg:
+		m.loading = false
+		m.folderDeleteKey = msg.key
+		m.folderDeleteCnt = msg.count
+		m.mode = bucketDetailDeleteFolder
+		m.deleteInput.SetValue("")
+		m.deleteInput.Focus()
+		return m, textinput.Blink
+
+	case folderDeleteProgressMsg:
+		m.deleteProgress = fmt.Sprintf("Deleting folder... %s objects removed", formatWithCommas(msg.deleted))
 		return m, nil
 
 	case spinner.TickMsg:
@@ -214,6 +235,8 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			return m.updateDetailAddPrefix(msg)
 		case bucketDetailConfirm:
 			return m.updateDetailConfirm(msg)
+		case bucketDetailDeleteFolder:
+			return m.updateDeleteFolder(msg)
 		}
 	}
 	return m, nil
@@ -854,7 +877,17 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [d] Delete file  [r] Refresh  [esc] Prefix list")
+		// Folder delete confirm overlay
+		if m.mode == bucketDetailDeleteFolder {
+			s += "\n"
+			s += "  " + warningStyle.Render(fmt.Sprintf("This will delete %s files in %s", formatWithCommas(m.folderDeleteCnt), m.folderDeleteKey)) + "\n"
+			s += "  " + warningStyle.Render("Type 'delete' to continue:") + "\n"
+			s += "  " + m.deleteInput.View() + "\n\n"
+			s += helpStyle.Render("  enter: delete  esc: cancel")
+			return s
+		}
+
+		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [d] Delete  [r] Refresh  [esc] Prefix list")
 	} else {
 		// Prefix list
 		if len(m.prefixes) > 0 {
@@ -980,10 +1013,23 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			return m.toggleBrowseFolder()
 		}
 	case "d":
-		// Delete selected file (not folders)
-		if m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
+		if m.browseCursor < len(m.browseItems) {
 			item := m.browseItems[m.browseCursor]
 			bucket := m.items[m.cursor]
+			if item.IsFolder {
+				// Folder delete — count objects first (with spinner)
+				m.loading = true
+				m.deleteProgress = "Counting objects..."
+				return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+					ctx := context.Background()
+					count, err := m.client.CountObjects(ctx, bucket.name, item.Key, bucket.region)
+					if err != nil {
+						return errMsg{err: err}
+					}
+					return folderCountedMsg{name: item.Name, key: item.Key, count: count}
+				})
+			}
+			// File delete
 			m.confirmAction = fmt.Sprintf("Delete file %q?", item.Name)
 			m.confirmFunc = func() tea.Msg {
 				ctx := context.Background()
@@ -1048,4 +1094,42 @@ func (m bucketsModel) toggleBrowseFolder() (bucketsModel, tea.Cmd) {
 	m.confirmInput2.SetValue("")
 	m.confirmInput2.Focus()
 	return m, textinput.Blink
+}
+
+func (m bucketsModel) updateDeleteFolder(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		typed := strings.TrimSpace(m.deleteInput.Value())
+		if typed != "delete" {
+			m.detailMessage = "You must type 'delete' to confirm. Cancelled."
+			m.deleteProgress = ""
+			m.mode = bucketDetail
+			return m, nil
+		}
+		bucket := m.items[m.cursor]
+		m.loading = true
+		m.deleteProgress = "Deleting folder... 0 objects removed"
+		m.mode = bucketDetail
+		folderKey := m.folderDeleteKey
+		return m, func() tea.Msg {
+			ctx := context.Background()
+			err := m.client.DeletePrefix(ctx, bucket.name, folderKey, bucket.region, func(deleted int64) {
+				if prog != nil {
+					prog.Send(folderDeleteProgressMsg{deleted: deleted})
+				}
+			})
+			if err != nil {
+				return errMsg{err: err}
+			}
+			return operationDoneMsg{message: fmt.Sprintf("Deleted folder %s and all its contents", folderKey)}
+		}
+	case "esc":
+		m.deleteProgress = ""
+		m.mode = bucketDetail
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.deleteInput, cmd = m.deleteInput.Update(msg)
+		return m, cmd
+	}
 }

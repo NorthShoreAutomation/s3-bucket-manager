@@ -148,6 +148,77 @@ func (c *Client) DeleteObject(ctx context.Context, bucket, key, region string) e
 	return nil
 }
 
+// CountObjects counts all objects under a given prefix (paginated, real-time).
+func (c *Client) CountObjects(ctx context.Context, bucket, prefix, region string) (int64, error) {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+	var total int64
+	var continuationToken *string
+	for {
+		output, err := c.S3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: continuationToken,
+		}, opts)
+		if err != nil {
+			return 0, fmt.Errorf("could not count objects under %q: %w", prefix, err)
+		}
+		total += int64(aws.ToInt32(output.KeyCount))
+		if !aws.ToBool(output.IsTruncated) {
+			break
+		}
+		continuationToken = output.NextContinuationToken
+	}
+	return total, nil
+}
+
+// DeletePrefix deletes all objects under a prefix. Reports progress via onProgress callback.
+func (c *Client) DeletePrefix(ctx context.Context, bucket, prefix, region string, onProgress func(deleted int64)) error {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+	var totalDeleted int64
+	var continuationToken *string
+	for {
+		output, err := c.S3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: continuationToken,
+		}, opts)
+		if err != nil {
+			return fmt.Errorf("could not list objects under %q: %w", prefix, err)
+		}
+		if len(output.Contents) == 0 {
+			break
+		}
+		objects := make([]s3types.ObjectIdentifier, 0, len(output.Contents))
+		for _, obj := range output.Contents {
+			objects = append(objects, s3types.ObjectIdentifier{Key: obj.Key})
+		}
+		_, err = c.S3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &s3types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+		}, opts)
+		if err != nil {
+			return fmt.Errorf("could not delete objects under %q: %w", prefix, err)
+		}
+		totalDeleted += int64(len(objects))
+		if onProgress != nil {
+			onProgress(totalDeleted)
+		}
+		if !aws.ToBool(output.IsTruncated) {
+			break
+		}
+		continuationToken = output.NextContinuationToken
+	}
+	return nil
+}
+
 // EmptyBucket deletes all objects (including versions) from a bucket.
 // onProgress is called after each batch with the total number of objects deleted so far.
 // Pass nil to skip progress reporting.

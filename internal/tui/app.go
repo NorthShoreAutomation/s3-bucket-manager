@@ -137,6 +137,7 @@ func (a App) isTextInputActive() bool {
 		a.buckets.mode == bucketsConfirmDeleteNonEmpty ||
 		a.buckets.mode == bucketDetailAddPrefix ||
 		a.buckets.mode == bucketDetailConfirm ||
+		a.buckets.mode == bucketDetailDeleteFolder ||
 		a.users.mode == usersCreate ||
 		a.users.mode == usersCreateBuckets
 }
@@ -220,6 +221,16 @@ type operationDoneMsg struct {
 
 type browseLoadedMsg struct {
 	items []awsClient.BrowseItem
+}
+
+type folderCountedMsg struct {
+	name  string
+	key   string
+	count int64
+}
+
+type folderDeleteProgressMsg struct {
+	deleted int64
 }
 
 // prog holds the running tea.Program so goroutines can send progress messages.
