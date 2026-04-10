@@ -272,11 +272,16 @@ func (c *Client) GetBucketObjectCount(ctx context.Context, bucket, region string
 }
 
 // ListPrefixes returns top-level prefixes (folders) in a bucket.
-func (c *Client) ListPrefixes(ctx context.Context, bucket string) ([]string, error) {
+func (c *Client) ListPrefixes(ctx context.Context, bucket, region string) ([]string, error) {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
 	output, err := c.S3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:    aws.String(bucket),
 		Delimiter: aws.String("/"),
-	})
+	}, opts)
 	if err != nil {
 		return nil, fmt.Errorf("could not list prefixes in %q: %w", bucket, err)
 	}

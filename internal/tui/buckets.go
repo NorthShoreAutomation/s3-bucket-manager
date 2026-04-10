@@ -585,7 +585,7 @@ func (m bucketsModel) loadPrefixes() tea.Cmd {
 	bucket := m.items[m.cursor]
 	return func() tea.Msg {
 		ctx := context.Background()
-		prefixNames, err := m.client.ListPrefixes(ctx, bucket.name)
+		prefixNames, err := m.client.ListPrefixes(ctx, bucket.name, bucket.region)
 		if err != nil {
 			return errMsg{err: err}
 		}

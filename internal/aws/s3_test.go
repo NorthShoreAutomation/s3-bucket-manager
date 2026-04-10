@@ -150,7 +150,7 @@ func TestListPrefixes(t *testing.T) {
 	}
 	client := &Client{S3: mock}
 
-	prefixes, err := client.ListPrefixes(context.Background(), "my-bucket")
+	prefixes, err := client.ListPrefixes(context.Background(), "my-bucket", "us-west-2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

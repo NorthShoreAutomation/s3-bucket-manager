@@ -28,7 +28,17 @@ var accessShowCmd = &cobra.Command{
 			return fmt.Errorf("Could not connect to AWS. Check your credentials.\n  Detail: %w", err)
 		}
 
-		prefixes, err := client.ListPrefixes(ctx, bucket)
+		// Look up bucket region for cross-region support
+		bucketRegion := client.Region
+		buckets, _ := client.ListBuckets(ctx)
+		for _, b := range buckets {
+			if b.Name == bucket {
+				bucketRegion = b.Region
+				break
+			}
+		}
+
+		prefixes, err := client.ListPrefixes(ctx, bucket, bucketRegion)
 		if err != nil {
 			return err
 		}
