@@ -98,49 +98,30 @@ func (d dashboardModel) view() string {
 		profileText = "default"
 	}
 
-	// Title bar
-	s := screenTitleStyle.Render("s3m") + "\n"
-	w := d.width
-	if w < 60 {
-		w = 60
-	}
-	s += separator(w) + "\n\n"
+	s := "\n"
+	s += screenTitleStyle.Render("s3m — S3 Bucket Manager") + "\n\n"
 
-	// Account info
-	labelStyle := lipgloss.NewStyle().Foreground(colorMuted).Width(10)
-	valueStyle := lipgloss.NewStyle().Foreground(colorText)
-	s += " " + labelStyle.Render("Profile") + valueStyle.Render(profileText) + "\n"
-	s += " " + labelStyle.Render("Region") + valueStyle.Render(d.client.Region) + "\n"
-	s += " " + labelStyle.Render("Account") + valueStyle.Render(d.client.Account) + "\n"
-	s += "\n"
+	// Account info — compact single-line style
+	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	valueStyle := lipgloss.NewStyle().Foreground(colorText).Bold(true)
+	s += fmt.Sprintf("  %s %s   %s %s   %s %s\n",
+		labelStyle.Render("Profile:"), valueStyle.Render(profileText),
+		labelStyle.Render("Region:"), valueStyle.Render(d.client.Region),
+		labelStyle.Render("Account:"), valueStyle.Render(d.client.Account))
 
 	if d.loading {
-		s += fmt.Sprintf(" %s Loading buckets and users...\n", d.spinner.View())
+		s += fmt.Sprintf("\n  %s Loading buckets and users...\n", d.spinner.View())
 	} else {
-		boxStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorBorder).
-			Padding(1, 3).
-			MarginRight(2).
-			Foreground(colorText)
-
-		countStyle := lipgloss.NewStyle().
-			Foreground(colorPrimary).
-			Bold(true)
-
-		mutedStyle := lipgloss.NewStyle().Foreground(colorMuted)
-		bucketBox := boxStyle.Render(
-			mutedStyle.Render("Buckets") + "\n" +
-				countStyle.Render(fmt.Sprintf("  %d", d.bucketCount)))
-		userBox := boxStyle.Render(
-			mutedStyle.Render("Users") + "\n" +
-				countStyle.Render(fmt.Sprintf("  %d", d.userCount)))
-
-		s += " " + lipgloss.JoinHorizontal(lipgloss.Top, bucketBox, userBox) + "\n"
+		countStyle := lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+		s += "\n"
+		s += fmt.Sprintf("  %s %s    %s %s\n",
+			countStyle.Render(fmt.Sprintf("%d", d.bucketCount)),
+			labelStyle.Render("buckets"),
+			countStyle.Render(fmt.Sprintf("%d", d.userCount)),
+			labelStyle.Render("managed users"))
 	}
 
-	s += "\n"
-	s += helpStyle.Render(" [b] Buckets  [u] Users  [a] Access  [?] Help  [q] Quit")
+	s += "\n" + helpStyle.Render("  [b] Buckets  [u] Users  [a] Access  [?] Help  [q] Quit") + "\n"
 
 	return s
 }

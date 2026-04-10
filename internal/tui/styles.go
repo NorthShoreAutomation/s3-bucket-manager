@@ -124,7 +124,7 @@ func padRight(s string, width int) string {
 
 func formatCount(n int64) string {
 	if n == 0 {
-		return dimStyle.Render("—")
+		return "—"
 	}
 	if n < 1000 {
 		return fmt.Sprintf("%d", n)
@@ -154,7 +154,7 @@ func separator(width int) string {
 
 func formatSize(bytes int64) string {
 	if bytes == 0 {
-		return dimStyle.Render("—")
+		return "—"
 	}
 	const (
 		kb = 1024
