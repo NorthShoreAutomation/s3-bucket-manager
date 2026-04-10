@@ -15,8 +15,6 @@ const (
 	screenBucketDetail
 	screenUsers
 	screenUserDetail
-	screenAccess
-	screenAccessDetail
 	screenCreateBucket
 	screenCreateUser
 	screenCredentials
@@ -33,7 +31,6 @@ type App struct {
 	dashboard dashboardModel
 	buckets   bucketsModel
 	users     usersModel
-	access    accessModel
 	creds     credentialsModel
 	showHelp  bool
 }
@@ -46,7 +43,6 @@ func NewApp(client *awsClient.Client) App {
 		dashboard: newDashboardModel(client),
 		buckets:   newBucketsModel(client),
 		users:     newUsersModel(client),
-		access:    newAccessModel(client),
 	}
 }
 
@@ -65,8 +61,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.buckets.height = msg.Height
 		a.users.width = msg.Width
 		a.users.height = msg.Height
-		a.access.width = msg.Width
-		a.access.height = msg.Height
 		return a, nil
 
 	case tea.KeyMsg:
@@ -112,8 +106,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a, cmd = a.updateBuckets(msg)
 	case screenUsers, screenUserDetail, screenCreateUser, screenCredentials:
 		a, cmd = a.updateUsers(msg)
-	case screenAccess, screenAccessDetail:
-		a, cmd = a.updateAccess(msg)
 	}
 
 	return a, cmd
@@ -132,8 +124,6 @@ func (a App) View() string {
 		content = a.buckets.view()
 	case screenUsers, screenUserDetail, screenCreateUser, screenCredentials:
 		content = a.users.view()
-	case screenAccess, screenAccessDetail:
-		content = a.access.view()
 	}
 
 	if a.err != nil {
@@ -147,7 +137,6 @@ func (a App) viewHelp() string {
 	s := titleStyle.Render("s3m - Keyboard Shortcuts") + "\n\n"
 	s += "  b       Open buckets\n"
 	s += "  u       Open users\n"
-	s += "  a       Open access control\n"
 	s += "  c       Create new item\n"
 	s += "  d       Delete selected item\n"
 	s += "  enter   Select / drill in\n"
@@ -162,6 +151,8 @@ func (a App) viewHelp() string {
 func (a App) isTextInputActive() bool {
 	return a.buckets.mode == bucketsCreate ||
 		a.buckets.mode == bucketsConfirmDeleteNonEmpty ||
+		a.buckets.mode == bucketDetailAddPrefix ||
+		a.buckets.mode == bucketDetailConfirm ||
 		a.users.mode == usersCreate ||
 		a.users.mode == usersCreateBuckets
 }
@@ -203,9 +194,6 @@ func (a App) updateDashboard(msg tea.Msg) (App, tea.Cmd) {
 				return a, nil
 			}
 			return a, a.users.init()
-		case "a":
-			a = a.pushScreen(screenAccess)
-			return a, a.access.init()
 		}
 	}
 	var cmd tea.Cmd
@@ -238,21 +226,6 @@ func (a App) updateUsers(msg tea.Msg) (App, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	a.users, cmd = a.users.update(msg)
-	return a, cmd
-}
-
-func (a App) updateAccess(msg tea.Msg) (App, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		// In bucket list mode, esc goes back to dashboard.
-		// In prefix list mode, esc goes back to bucket list (handled by sub-model).
-		if msg.String() == "esc" && a.access.mode == accessBucketList {
-			a = a.popScreen()
-			return a, a.dashboard.init()
-		}
-	}
-	var cmd tea.Cmd
-	a.access, cmd = a.access.update(msg)
 	return a, cmd
 }
 

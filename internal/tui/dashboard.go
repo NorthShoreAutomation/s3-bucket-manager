@@ -121,7 +121,7 @@ func (d dashboardModel) view() string {
 			labelStyle.Render("managed users"))
 	}
 
-	s += "\n" + helpStyle.Render("  [b] Buckets  [u] Users  [a] Access  [?] Help  [q] Quit") + "\n"
+	s += "\n" + helpStyle.Render("  [b] Buckets  [u] Users  [?] Help  [q] Quit") + "\n"
 
 	return s
 }

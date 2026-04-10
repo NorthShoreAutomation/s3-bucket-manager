@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Merged access control into bucket detail view; press Enter on a bucket to manage public/private access for the bucket and individual prefixes
+- Removed separate `[a] Access` screen from the dashboard
+
 ### Added
 - Interactive TUI dashboard with Bubble Tea
 - TUI screens for buckets, users, and access control
