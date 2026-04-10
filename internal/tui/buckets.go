@@ -920,6 +920,9 @@ func (m bucketsModel) viewBrowse() string {
 	}
 	s := breadcrumbStyle.Render(fmt.Sprintf("dashboard > buckets > %s > %s", bucket.name, path)) + "\n"
 	s += screenTitleStyle.Render(fmt.Sprintf("%s:%s", bucket.name, path)) + "\n"
+	if bucket.isPublic {
+		s += " " + dimStyle.Render(publicURL(bucket.name, m.browsePrefix)) + "\n"
+	}
 	s += separator(browseWidth) + "\n"
 
 	if m.loading {
@@ -983,6 +986,12 @@ func (m bucketsModel) viewBrowse() string {
 
 	if end < len(m.browseItems) {
 		s += dimStyle.Render(fmt.Sprintf(" ▼ %d more below", len(m.browseItems)-end)) + "\n"
+	}
+
+	// Show full URL for the selected item if bucket is public
+	if bucket.isPublic && m.browseCursor < len(m.browseItems) {
+		item := m.browseItems[m.browseCursor]
+		s += "\n " + lipgloss.NewStyle().Foreground(colorPrimary).Render(publicURL(bucket.name, item.Key))
 	}
 
 	s += "\n" + helpStyle.Render(" [enter/→] Open folder  [esc/←] Back  [r] Refresh  [q] Quit")
