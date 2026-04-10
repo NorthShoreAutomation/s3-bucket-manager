@@ -13,11 +13,12 @@ import (
 )
 
 type bucketItem struct {
-	name     string
-	region   string
-	isPublic bool
-	objects  int64
-	created  string
+	name      string
+	region    string
+	isPublic  bool
+	objects   int64
+	sizeBytes int64
+	created   string
 }
 
 type bucketsMode int
@@ -209,7 +210,7 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 }
 
 func (m bucketsModel) view() string {
-	tableWidth := colName + colRegion + colStatus + colCount + colCreated + 10 // gaps between cols + left pad
+	tableWidth := colName + colRegion + colStatus + colCount + colSize + colCreated + 12 // gaps between cols + left pad
 	if m.width > tableWidth {
 		tableWidth = m.width
 	}
@@ -247,11 +248,12 @@ func (m bucketsModel) view() string {
 	}
 
 	// Table header row
-	header := fmt.Sprintf(" %s  %s  %s  %s  %s",
+	header := fmt.Sprintf(" %s  %s  %s  %s  %s  %s",
 		pad("NAME", colName),
 		pad("REGION", colRegion),
 		pad("", colStatus),
 		padRight("OBJECTS", colCount),
+		padRight("SIZE", colSize),
 		pad("CREATED", colCreated))
 	s += tableHeaderStyle.Width(tableWidth).Render(header) + "\n"
 
@@ -270,17 +272,18 @@ func (m bucketsModel) view() string {
 		name := truncate(b.name, colName)
 		region := pad(b.region, colRegion)
 		count := padRight(formatCount(b.objects), colCount)
+		size := padRight(formatSize(b.sizeBytes), colSize)
 		created := pad(b.created, colCreated)
 
 		if i == m.cursor {
 			icon := accessIconSelected(b.isPublic)
-			row := fmt.Sprintf(" %s  %s  %s  %s  %s",
-				pad(name, colName), region, icon, count, created)
+			row := fmt.Sprintf(" %s  %s  %s  %s  %s  %s",
+				pad(name, colName), region, icon, count, size, created)
 			s += rowSelectedStyle.Width(tableWidth).Render(row) + "\n"
 		} else {
 			icon := accessIcon(b.isPublic)
-			row := fmt.Sprintf(" %s  %s  %s  %s  %s",
-				pad(name, colName), region, icon, count, created)
+			row := fmt.Sprintf(" %s  %s  %s  %s  %s  %s",
+				pad(name, colName), region, icon, count, size, created)
 			s += rowStyle.Render(row) + "\n"
 		}
 	}

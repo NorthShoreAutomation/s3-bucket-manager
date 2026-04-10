@@ -79,6 +79,7 @@ var (
 	colRegion  = 13
 	colStatus  = 4
 	colCount   = 8
+	colSize    = 9
 	colCreated = 12
 )
 
@@ -149,6 +150,30 @@ func formatWithCommas(n int64) string {
 func separator(width int) string {
 	line := strings.Repeat("─", width)
 	return lipgloss.NewStyle().Foreground(colorBorder).Render(line)
+}
+
+func formatSize(bytes int64) string {
+	if bytes == 0 {
+		return dimStyle.Render("—")
+	}
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+		tb = 1024 * gb
+	)
+	switch {
+	case bytes >= tb:
+		return fmt.Sprintf("%.1f TB", float64(bytes)/float64(tb))
+	case bytes >= gb:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(gb))
+	case bytes >= mb:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(mb))
+	case bytes >= kb:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }
 
 // Keep old function name working for other screens during transition

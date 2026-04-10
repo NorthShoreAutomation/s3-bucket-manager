@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/dcorbell/s3m/internal/model"
@@ -160,20 +162,48 @@ func TestListPrefixes(t *testing.T) {
 	}
 }
 
-func TestGetBucketObjectCount(t *testing.T) {
-	mock := &mockS3{
-		listObjectsV2Output: &s3.ListObjectsV2Output{
-			KeyCount: aws.Int32(42),
+// mockCloudWatch implements CloudWatchAPI for testing.
+type mockCloudWatch struct {
+	CloudWatchAPI
+	output *cloudwatch.GetMetricStatisticsOutput
+}
+
+func (m *mockCloudWatch) GetMetricStatistics(ctx context.Context, params *cloudwatch.GetMetricStatisticsInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricStatisticsOutput, error) {
+	return m.output, nil
+}
+
+func TestGetBucketStats(t *testing.T) {
+	now := time.Now()
+	avg42 := 42.0
+	avg1024 := 1024.0
+	cwMock := &mockCloudWatch{
+		output: &cloudwatch.GetMetricStatisticsOutput{
+			Datapoints: []cwtypes.Datapoint{
+				{Timestamp: &now, Average: &avg42},
+			},
 		},
 	}
-	client := &Client{S3: mock}
+	// Override to return size on second call
+	client := &Client{CloudWatch: cwMock}
 
-	count, err := client.GetBucketObjectCount(context.Background(), "my-bucket")
+	stats, err := client.GetBucketStats(context.Background(), "my-bucket")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if count != 42 {
-		t.Errorf("expected 42, got %d", count)
+	// Both metrics hit the same mock, so both return 42
+	if stats.ObjectCount != 42 {
+		t.Errorf("expected 42 objects, got %d", stats.ObjectCount)
+	}
+
+	// Test with size value
+	cwMock.output = &cloudwatch.GetMetricStatisticsOutput{
+		Datapoints: []cwtypes.Datapoint{
+			{Timestamp: &now, Average: &avg1024},
+		},
+	}
+	stats, _ = client.GetBucketStats(context.Background(), "my-bucket")
+	if stats.SizeBytes != 1024 {
+		t.Errorf("expected 1024 bytes, got %d", stats.SizeBytes)
 	}
 }
 

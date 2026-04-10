@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/dcorbell/s3m/internal/model"
@@ -105,25 +108,60 @@ func (c *Client) DeleteBucket(ctx context.Context, name string) error {
 	return nil
 }
 
-// GetBucketObjectCount returns the total number of objects in a bucket (paginated).
-func (c *Client) GetBucketObjectCount(ctx context.Context, bucket string) (int64, error) {
-	var total int64
-	var continuationToken *string
-	for {
-		output, err := c.S3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket:            aws.String(bucket),
-			ContinuationToken: continuationToken,
-		})
-		if err != nil {
-			return 0, fmt.Errorf("could not count objects in %q: %w", bucket, err)
-		}
-		total += int64(aws.ToInt32(output.KeyCount))
-		if !aws.ToBool(output.IsTruncated) {
-			break
-		}
-		continuationToken = output.NextContinuationToken
+// BucketStats holds pre-computed stats from CloudWatch.
+type BucketStats struct {
+	ObjectCount int64
+	SizeBytes   int64
+}
+
+// GetBucketStats fetches object count and size from CloudWatch daily metrics.
+// These are updated once per day by S3 — fast and accurate for dashboard display.
+func (c *Client) GetBucketStats(ctx context.Context, bucket string) (BucketStats, error) {
+	now := time.Now()
+	start := now.Add(-48 * time.Hour) // look back 2 days to ensure we get a data point
+
+	objectCount := c.getCloudWatchMetric(ctx, bucket, "NumberOfObjects", "AllStorageTypes", start, now)
+	sizeBytes := c.getCloudWatchMetric(ctx, bucket, "BucketSizeBytes", "StandardStorage", start, now)
+
+	return BucketStats{
+		ObjectCount: int64(objectCount),
+		SizeBytes:   int64(sizeBytes),
+	}, nil
+}
+
+func (c *Client) getCloudWatchMetric(ctx context.Context, bucket, metricName, storageType string, start, end time.Time) float64 {
+	output, err := c.CloudWatch.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String("AWS/S3"),
+		MetricName: aws.String(metricName),
+		Dimensions: []cwtypes.Dimension{
+			{Name: aws.String("BucketName"), Value: aws.String(bucket)},
+			{Name: aws.String("StorageType"), Value: aws.String(storageType)},
+		},
+		StartTime:  &start,
+		EndTime:    &end,
+		Period:     aws.Int32(86400), // 1 day
+		Statistics: []cwtypes.Statistic{cwtypes.StatisticAverage},
+	})
+	if err != nil || len(output.Datapoints) == 0 {
+		return 0
 	}
-	return total, nil
+	// Return the most recent data point
+	latest := output.Datapoints[0]
+	for _, dp := range output.Datapoints[1:] {
+		if dp.Timestamp.After(*latest.Timestamp) {
+			latest = dp
+		}
+	}
+	if latest.Average != nil {
+		return *latest.Average
+	}
+	return 0
+}
+
+// GetBucketObjectCount returns the object count from CloudWatch (convenience wrapper).
+func (c *Client) GetBucketObjectCount(ctx context.Context, bucket string) (int64, error) {
+	stats, err := c.GetBucketStats(ctx, bucket)
+	return stats.ObjectCount, err
 }
 
 // ListPrefixes returns top-level prefixes (folders) in a bucket.

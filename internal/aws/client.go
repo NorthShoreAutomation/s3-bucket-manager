@@ -6,6 +6,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -48,14 +49,20 @@ type STSAPI interface {
 	GetCallerIdentity(ctx context.Context, params *sts.GetCallerIdentityInput, optFns ...func(*sts.Options)) (*sts.GetCallerIdentityOutput, error)
 }
 
+// CloudWatchAPI defines the CloudWatch operations used by s3m.
+type CloudWatchAPI interface {
+	GetMetricStatistics(ctx context.Context, params *cloudwatch.GetMetricStatisticsInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.GetMetricStatisticsOutput, error)
+}
+
 // Client wraps AWS service clients.
 type Client struct {
-	S3      S3API
-	IAM     IAMAPI
-	STS     STSAPI
-	Region  string
-	Profile string
-	Account string
+	S3         S3API
+	IAM        IAMAPI
+	STS        STSAPI
+	CloudWatch CloudWatchAPI
+	Region     string
+	Profile    string
+	Account    string
 }
 
 // NewClient creates an AWS client with the given profile and region.
@@ -81,13 +88,15 @@ func NewClient(ctx context.Context, profile, region string) (*Client, error) {
 	s3Client := s3.NewFromConfig(cfg)
 	iamClient := iam.NewFromConfig(cfg)
 	stsClient := sts.NewFromConfig(cfg)
+	cwClient := cloudwatch.NewFromConfig(cfg)
 
 	c := &Client{
-		S3:      s3Client,
-		IAM:     iamClient,
-		STS:     stsClient,
-		Region:  cfg.Region,
-		Profile: profile,
+		S3:         s3Client,
+		IAM:        iamClient,
+		STS:        stsClient,
+		CloudWatch: cwClient,
+		Region:     cfg.Region,
+		Profile:    profile,
 	}
 
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})

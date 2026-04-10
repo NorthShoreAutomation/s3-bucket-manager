@@ -42,13 +42,14 @@ func (d dashboardModel) init() tea.Cmd {
 		buckets, _ := d.client.ListBuckets(ctx)
 		var items []bucketItem
 		for _, b := range buckets {
-			count, _ := d.client.GetBucketObjectCount(ctx, b.Name)
+			stats, _ := d.client.GetBucketStats(ctx, b.Name)
 			items = append(items, bucketItem{
-				name:     b.Name,
-				region:   b.Region,
-				isPublic: b.IsPublic,
-				objects:  count,
-				created:  b.CreationDate.Format("2006-01-02"),
+				name:      b.Name,
+				region:    b.Region,
+				isPublic:  b.IsPublic,
+				objects:   stats.ObjectCount,
+				sizeBytes: stats.SizeBytes,
+				created:   b.CreationDate.Format("2006-01-02"),
 			})
 		}
 		users, _ := d.client.ListManagedUsers(ctx)
