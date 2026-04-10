@@ -161,6 +161,7 @@ func (a App) viewHelp() string {
 // isTextInputActive returns true when the user is typing in a text field.
 func (a App) isTextInputActive() bool {
 	return a.buckets.mode == bucketsCreate ||
+		a.buckets.mode == bucketsConfirmDeleteNonEmpty ||
 		a.users.mode == usersCreate ||
 		a.users.mode == usersCreateBuckets
 }
@@ -261,6 +262,11 @@ type errMsg struct{ err error }
 
 type bucketsLoadedMsg struct {
 	buckets []bucketItem
+}
+
+type bucketNotEmptyMsg struct {
+	name   string
+	region string
 }
 
 type usersLoadedMsg struct {

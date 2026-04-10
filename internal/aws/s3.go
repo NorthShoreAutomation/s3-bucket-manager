@@ -119,6 +119,62 @@ func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
 	return nil
 }
 
+// EmptyBucket deletes all objects (including versions) from a bucket.
+func (c *Client) EmptyBucket(ctx context.Context, name, region string) error {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+
+	// Delete all object versions (handles versioned buckets)
+	var keyMarker, versionMarker *string
+	for {
+		versions, err := c.S3.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket:          aws.String(name),
+			KeyMarker:       keyMarker,
+			VersionIdMarker: versionMarker,
+		}, opts)
+		if err != nil {
+			return fmt.Errorf("could not list objects in %q: %w", name, err)
+		}
+
+		var objects []s3types.ObjectIdentifier
+		for _, v := range versions.Versions {
+			objects = append(objects, s3types.ObjectIdentifier{
+				Key:       v.Key,
+				VersionId: v.VersionId,
+			})
+		}
+		for _, dm := range versions.DeleteMarkers {
+			objects = append(objects, s3types.ObjectIdentifier{
+				Key:       dm.Key,
+				VersionId: dm.VersionId,
+			})
+		}
+
+		if len(objects) > 0 {
+			_, err = c.S3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+				Bucket: aws.String(name),
+				Delete: &s3types.Delete{
+					Objects: objects,
+					Quiet:   aws.Bool(true),
+				},
+			}, opts)
+			if err != nil {
+				return fmt.Errorf("could not delete objects in %q: %w", name, err)
+			}
+		}
+
+		if !aws.ToBool(versions.IsTruncated) {
+			break
+		}
+		keyMarker = versions.NextKeyMarker
+		versionMarker = versions.NextVersionIdMarker
+	}
+	return nil
+}
+
 // IsBucketEmpty does a real-time check (not CloudWatch) for objects in a bucket.
 func (c *Client) IsBucketEmpty(ctx context.Context, name, region string) (bool, error) {
 	opts := func(o *s3.Options) {

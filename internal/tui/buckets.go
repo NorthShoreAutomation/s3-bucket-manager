@@ -28,34 +28,40 @@ const (
 	bucketsList bucketsMode = iota
 	bucketsCreate
 	bucketsConfirmDelete
+	bucketsConfirmDeleteNonEmpty // type bucket name to confirm
 )
 
 type bucketsModel struct {
-	client    *awsClient.Client
-	items     []bucketItem
-	cursor    int
-	offset    int // first visible row for scrolling
-	loading   bool
-	width     int
-	height    int
-	mode      bucketsMode
-	nameInput textinput.Model
-	message   string
-	spinner   spinner.Model
+	client       *awsClient.Client
+	items        []bucketItem
+	cursor       int
+	offset       int // first visible row for scrolling
+	loading      bool
+	width        int
+	height       int
+	mode         bucketsMode
+	nameInput    textinput.Model
+	confirmInput textinput.Model // type bucket name to confirm destructive delete
+	message      string
+	spinner      spinner.Model
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
 	ti := textinput.New()
 	ti.Placeholder = "my-bucket-name"
 	ti.CharLimit = 63
+	ci := textinput.New()
+	ci.Placeholder = "type bucket name to confirm"
+	ci.CharLimit = 63
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 	return bucketsModel{
-		client:    client,
-		nameInput: ti,
-		loading:   true,
-		spinner:   sp,
+		client:       client,
+		nameInput:    ti,
+		confirmInput: ci,
+		loading:      true,
+		spinner:      sp,
 	}
 }
 
@@ -105,6 +111,13 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.mode = bucketsList
 		return m, m.init()
 
+	case bucketNotEmptyMsg:
+		m.loading = false
+		m.mode = bucketsConfirmDeleteNonEmpty
+		m.confirmInput.SetValue("")
+		m.confirmInput.Focus()
+		return m, textinput.Blink
+
 	case spinner.TickMsg:
 		if m.loading {
 			var cmd tea.Cmd
@@ -120,6 +133,8 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			return m.updateCreate(msg)
 		case bucketsConfirmDelete:
 			return m.updateConfirmDelete(msg)
+		case bucketsConfirmDeleteNonEmpty:
+			return m.updateConfirmDeleteNonEmpty(msg)
 		}
 	}
 	return m, nil
@@ -209,7 +224,8 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 				return errMsg{err: err}
 			}
 			if !empty {
-				return errMsg{err: fmt.Errorf("Bucket %q is not empty. Remove all objects first.", bucket.name)}
+				// Bucket has objects — ask user to type name to confirm
+				return bucketNotEmptyMsg{name: bucket.name, region: bucket.region}
 			}
 			err = m.client.DeleteBucket(ctx, bucket.name, bucket.region)
 			if err != nil {
@@ -221,6 +237,40 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 		m.mode = bucketsList
 	}
 	return m, nil
+}
+
+func (m bucketsModel) updateConfirmDeleteNonEmpty(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		typed := strings.TrimSpace(m.confirmInput.Value())
+		bucket := m.items[m.cursor]
+		if typed != bucket.name {
+			m.message = "Name doesn't match. Delete cancelled."
+			m.mode = bucketsList
+			return m, nil
+		}
+		m.loading = true
+		m.mode = bucketsList
+		return m, func() tea.Msg {
+			ctx := context.Background()
+			err := m.client.EmptyBucket(ctx, bucket.name, bucket.region)
+			if err != nil {
+				return errMsg{err: err}
+			}
+			err = m.client.DeleteBucket(ctx, bucket.name, bucket.region)
+			if err != nil {
+				return errMsg{err: err}
+			}
+			return operationDoneMsg{message: fmt.Sprintf("Deleted bucket %q and all its objects", bucket.name)}
+		}
+	case "esc":
+		m.mode = bucketsList
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.confirmInput, cmd = m.confirmInput.Update(msg)
+		return m, cmd
+	}
 }
 
 func (m bucketsModel) view() string {
@@ -246,6 +296,17 @@ func (m bucketsModel) view() string {
 	case bucketsConfirmDelete:
 		if m.cursor < len(m.items) {
 			s += "\n " + warningStyle.Render(fmt.Sprintf("Delete bucket %q? [y/N]", m.items[m.cursor].name))
+		}
+		return s
+	case bucketsConfirmDeleteNonEmpty:
+		if m.cursor < len(m.items) {
+			bucket := m.items[m.cursor]
+			s += "\n"
+			s += " " + warningStyle.Render("This bucket is not empty.") + "\n"
+			s += " " + warningStyle.Render("ALL objects will be permanently deleted.") + "\n\n"
+			s += fmt.Sprintf(" Type %s to confirm:\n", warningStyle.Render(bucket.name))
+			s += " " + m.confirmInput.View() + "\n\n"
+			s += helpStyle.Render(" enter: delete everything  esc: cancel")
 		}
 		return s
 	}
