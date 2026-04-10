@@ -143,13 +143,13 @@ type BucketStats struct {
 }
 
 // GetBucketStats fetches object count and size from CloudWatch daily metrics.
-// These are updated once per day by S3 — fast and accurate for dashboard display.
-func (c *Client) GetBucketStats(ctx context.Context, bucket string) (BucketStats, error) {
+// Queries CloudWatch in the bucket's region since S3 metrics are published there.
+func (c *Client) GetBucketStats(ctx context.Context, bucket, region string) (BucketStats, error) {
 	now := time.Now()
 	start := now.Add(-48 * time.Hour) // look back 2 days to ensure we get a data point
 
-	objectCount := c.getCloudWatchMetric(ctx, bucket, "NumberOfObjects", "AllStorageTypes", start, now)
-	sizeBytes := c.getCloudWatchMetric(ctx, bucket, "BucketSizeBytes", "StandardStorage", start, now)
+	objectCount := c.getCloudWatchMetric(ctx, bucket, "NumberOfObjects", "AllStorageTypes", region, start, now)
+	sizeBytes := c.getCloudWatchMetric(ctx, bucket, "BucketSizeBytes", "StandardStorage", region, start, now)
 
 	return BucketStats{
 		ObjectCount: int64(objectCount),
@@ -157,7 +157,12 @@ func (c *Client) GetBucketStats(ctx context.Context, bucket string) (BucketStats
 	}, nil
 }
 
-func (c *Client) getCloudWatchMetric(ctx context.Context, bucket, metricName, storageType string, start, end time.Time) float64 {
+func (c *Client) getCloudWatchMetric(ctx context.Context, bucket, metricName, storageType, region string, start, end time.Time) float64 {
+	opts := func(o *cloudwatch.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
 	output, err := c.CloudWatch.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
 		Namespace:  aws.String("AWS/S3"),
 		MetricName: aws.String(metricName),
@@ -169,7 +174,7 @@ func (c *Client) getCloudWatchMetric(ctx context.Context, bucket, metricName, st
 		EndTime:    &end,
 		Period:     aws.Int32(86400), // 1 day
 		Statistics: []cwtypes.Statistic{cwtypes.StatisticAverage},
-	})
+	}, opts)
 	if err != nil || len(output.Datapoints) == 0 {
 		return 0
 	}
@@ -187,8 +192,8 @@ func (c *Client) getCloudWatchMetric(ctx context.Context, bucket, metricName, st
 }
 
 // GetBucketObjectCount returns the object count from CloudWatch (convenience wrapper).
-func (c *Client) GetBucketObjectCount(ctx context.Context, bucket string) (int64, error) {
-	stats, err := c.GetBucketStats(ctx, bucket)
+func (c *Client) GetBucketObjectCount(ctx context.Context, bucket, region string) (int64, error) {
+	stats, err := c.GetBucketStats(ctx, bucket, region)
 	return stats.ObjectCount, err
 }
 

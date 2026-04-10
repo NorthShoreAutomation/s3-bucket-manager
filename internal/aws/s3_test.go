@@ -186,7 +186,7 @@ func TestGetBucketStats(t *testing.T) {
 	// Override to return size on second call
 	client := &Client{CloudWatch: cwMock}
 
-	stats, err := client.GetBucketStats(context.Background(), "my-bucket")
+	stats, err := client.GetBucketStats(context.Background(), "my-bucket", "us-west-2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestGetBucketStats(t *testing.T) {
 			{Timestamp: &now, Average: &avg1024},
 		},
 	}
-	stats, _ = client.GetBucketStats(context.Background(), "my-bucket")
+	stats, _ = client.GetBucketStats(context.Background(), "my-bucket", "us-west-2")
 	if stats.SizeBytes != 1024 {
 		t.Errorf("expected 1024 bytes, got %d", stats.SizeBytes)
 	}

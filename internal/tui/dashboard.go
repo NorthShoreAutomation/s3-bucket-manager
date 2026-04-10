@@ -51,12 +51,12 @@ func (d dashboardModel) init() tea.Cmd {
 				created:  b.CreationDate.Format("2006-01-02"),
 			}
 			wg.Add(1)
-			go func(idx int, name string) {
+			go func(idx int, name, region string) {
 				defer wg.Done()
-				stats, _ := d.client.GetBucketStats(ctx, name)
+				stats, _ := d.client.GetBucketStats(ctx, name, region)
 				items[idx].objects = stats.ObjectCount
 				items[idx].sizeBytes = stats.SizeBytes
-			}(i, b.Name)
+			}(i, b.Name, b.Region)
 		}
 		wg.Wait()
 		users, _ := d.client.ListManagedUsers(ctx)
