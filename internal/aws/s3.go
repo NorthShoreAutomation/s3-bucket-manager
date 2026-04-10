@@ -120,14 +120,16 @@ func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
 }
 
 // EmptyBucket deletes all objects (including versions) from a bucket.
-func (c *Client) EmptyBucket(ctx context.Context, name, region string) error {
+// onProgress is called after each batch with the total number of objects deleted so far.
+// Pass nil to skip progress reporting.
+func (c *Client) EmptyBucket(ctx context.Context, name, region string, onProgress func(deleted int64)) error {
 	opts := func(o *s3.Options) {
 		if region != "" {
 			o.Region = region
 		}
 	}
 
-	// Delete all object versions (handles versioned buckets)
+	var totalDeleted int64
 	var keyMarker, versionMarker *string
 	for {
 		versions, err := c.S3.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
@@ -163,6 +165,10 @@ func (c *Client) EmptyBucket(ctx context.Context, name, region string) error {
 			}, opts)
 			if err != nil {
 				return fmt.Errorf("could not delete objects in %q: %w", name, err)
+			}
+			totalDeleted += int64(len(objects))
+			if onProgress != nil {
+				onProgress(totalDeleted)
 			}
 		}
 

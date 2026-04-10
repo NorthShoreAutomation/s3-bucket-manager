@@ -269,6 +269,10 @@ type bucketNotEmptyMsg struct {
 	region string
 }
 
+type deleteProgressMsg struct {
+	deleted int64
+}
+
 type usersLoadedMsg struct {
 	users []userItem
 }
@@ -288,6 +292,9 @@ type operationDoneMsg struct {
 	message string
 }
 
+// prog holds the running tea.Program so goroutines can send progress messages.
+var prog *tea.Program
+
 // Run starts the TUI.
 func Run(profile, region string) error {
 	ctx := context.Background()
@@ -298,6 +305,7 @@ func Run(profile, region string) error {
 
 	app := NewApp(client)
 	p := tea.NewProgram(app, tea.WithAltScreen())
+	prog = p
 	_, err = p.Run()
 	return err
 }

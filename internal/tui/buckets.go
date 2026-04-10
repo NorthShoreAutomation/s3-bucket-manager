@@ -32,18 +32,19 @@ const (
 )
 
 type bucketsModel struct {
-	client       *awsClient.Client
-	items        []bucketItem
-	cursor       int
-	offset       int // first visible row for scrolling
-	loading      bool
-	width        int
-	height       int
-	mode         bucketsMode
-	nameInput    textinput.Model
-	confirmInput textinput.Model // type bucket name to confirm destructive delete
-	message      string
-	spinner      spinner.Model
+	client         *awsClient.Client
+	items          []bucketItem
+	cursor         int
+	offset         int // first visible row for scrolling
+	loading        bool
+	width          int
+	height         int
+	mode           bucketsMode
+	nameInput      textinput.Model
+	confirmInput   textinput.Model // type bucket name to confirm destructive delete
+	message        string
+	spinner        spinner.Model
+	deleteProgress string // shown during bucket emptying
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -101,6 +102,7 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.items = msg.buckets
 		m.loading = false
 		m.message = ""
+		m.deleteProgress = ""
 		if m.cursor >= len(m.items) {
 			m.cursor = max(0, len(m.items)-1)
 		}
@@ -117,6 +119,10 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.confirmInput.SetValue("")
 		m.confirmInput.Focus()
 		return m, textinput.Blink
+
+	case deleteProgressMsg:
+		m.deleteProgress = fmt.Sprintf("Emptying bucket... %s objects removed", formatWithCommas(msg.deleted))
+		return m, nil
 
 	case spinner.TickMsg:
 		if m.loading {
@@ -250,10 +256,15 @@ func (m bucketsModel) updateConfirmDeleteNonEmpty(msg tea.KeyMsg) (bucketsModel,
 			return m, nil
 		}
 		m.loading = true
+		m.deleteProgress = "Emptying bucket... 0 objects removed"
 		m.mode = bucketsList
 		return m, func() tea.Msg {
 			ctx := context.Background()
-			err := m.client.EmptyBucket(ctx, bucket.name, bucket.region)
+			err := m.client.EmptyBucket(ctx, bucket.name, bucket.region, func(deleted int64) {
+				if prog != nil {
+					prog.Send(deleteProgressMsg{deleted: deleted})
+				}
+			})
 			if err != nil {
 				return errMsg{err: err}
 			}
@@ -312,7 +323,11 @@ func (m bucketsModel) view() string {
 	}
 
 	if m.loading {
-		s += fmt.Sprintf(" %s Loading buckets...\n", m.spinner.View())
+		if m.deleteProgress != "" {
+			s += fmt.Sprintf(" %s %s\n", m.spinner.View(), m.deleteProgress)
+		} else {
+			s += fmt.Sprintf(" %s Loading buckets...\n", m.spinner.View())
+		}
 		return s
 	}
 
