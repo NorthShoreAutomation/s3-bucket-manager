@@ -844,6 +844,16 @@ func (m bucketsModel) viewDetail() string {
 			}
 		}
 
+		// Confirm overlay (for file delete while browsing)
+		if m.mode == bucketDetailConfirm {
+			s += "\n"
+			s += "  " + warningStyle.Render(m.confirmAction) + "\n"
+			s += "  " + warningStyle.Render("Type \"yes\" to confirm:") + "\n"
+			s += "  " + m.confirmInput2.View() + "\n\n"
+			s += helpStyle.Render("  enter: confirm  esc: cancel")
+			return s
+		}
+
 		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [d] Delete file  [r] Refresh  [esc] Prefix list")
 	} else {
 		// Prefix list
