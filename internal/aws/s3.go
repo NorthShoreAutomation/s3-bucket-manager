@@ -288,6 +288,75 @@ func (c *Client) ListPrefixes(ctx context.Context, bucket string) ([]string, err
 	return prefixes, nil
 }
 
+// BrowseItem represents a folder or file in a bucket listing.
+type BrowseItem struct {
+	Name         string // display name (just the last segment, no full prefix)
+	Key          string // full S3 key or prefix
+	IsFolder     bool
+	Size         int64
+	LastModified time.Time
+}
+
+// ListContents returns folders and files at a given prefix in a bucket.
+func (c *Client) ListContents(ctx context.Context, bucket, prefix, region string) ([]BrowseItem, error) {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+
+	var items []BrowseItem
+	var continuationToken *string
+
+	for {
+		input := &s3.ListObjectsV2Input{
+			Bucket:            aws.String(bucket),
+			Prefix:            aws.String(prefix),
+			Delimiter:         aws.String("/"),
+			ContinuationToken: continuationToken,
+		}
+		output, err := c.S3.ListObjectsV2(ctx, input, opts)
+		if err != nil {
+			return nil, fmt.Errorf("could not list contents of %q: %w", bucket, err)
+		}
+
+		// Folders (common prefixes)
+		for _, cp := range output.CommonPrefixes {
+			fullPrefix := aws.ToString(cp.Prefix)
+			name := strings.TrimPrefix(fullPrefix, prefix)
+			items = append(items, BrowseItem{
+				Name:     name,
+				Key:      fullPrefix,
+				IsFolder: true,
+			})
+		}
+
+		// Files (objects at this level)
+		for _, obj := range output.Contents {
+			key := aws.ToString(obj.Key)
+			// Skip the prefix itself if it appears as an object
+			if key == prefix {
+				continue
+			}
+			name := strings.TrimPrefix(key, prefix)
+			items = append(items, BrowseItem{
+				Name:         name,
+				Key:          key,
+				IsFolder:     false,
+				Size:         aws.ToInt64(obj.Size),
+				LastModified: aws.ToTime(obj.LastModified),
+			})
+		}
+
+		if !aws.ToBool(output.IsTruncated) {
+			break
+		}
+		continuationToken = output.NextContinuationToken
+	}
+
+	return items, nil
+}
+
 // policyDocument represents an S3 bucket policy.
 type policyDocument struct {
 	Version   string            `json:"Version"`

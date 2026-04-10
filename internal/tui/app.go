@@ -218,6 +218,10 @@ type operationDoneMsg struct {
 	message string
 }
 
+type browseLoadedMsg struct {
+	items []awsClient.BrowseItem
+}
+
 // prog holds the running tea.Program so goroutines can send progress messages.
 var prog *tea.Program
 

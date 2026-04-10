@@ -38,6 +38,7 @@ const (
 	bucketDetail                             // viewing a single bucket's details
 	bucketDetailAddPrefix                    // typing a new prefix name
 	bucketDetailConfirm                      // type 'yes' to confirm access change
+	bucketBrowse                             // file browser navigating bucket contents
 )
 
 type bucketsModel struct {
@@ -64,6 +65,12 @@ type bucketsModel struct {
 	confirmAction string          // description of what will happen
 	confirmFunc   func() tea.Msg  // the action to execute on confirmation
 	detailMessage string          // status message in detail view
+
+	// File browser fields
+	browsePrefix string                 // current prefix being browsed (empty = root)
+	browseItems  []awsClient.BrowseItem // folders + files at current prefix
+	browseCursor int                    // cursor in browse view
+	browseOffset int                    // scroll offset in browse view
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -170,6 +177,13 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.detailCursor = 0
 		return m, nil
 
+	case browseLoadedMsg:
+		m.browseItems = msg.items
+		m.loading = false
+		m.browseCursor = 0
+		m.browseOffset = 0
+		return m, nil
+
 	case spinner.TickMsg:
 		if m.loading {
 			var cmd tea.Cmd
@@ -195,6 +209,8 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			return m.updateDetailAddPrefix(msg)
 		case bucketDetailConfirm:
 			return m.updateDetailConfirm(msg)
+		case bucketBrowse:
+			return m.updateBrowse(msg)
 		}
 	}
 	return m, nil
@@ -414,6 +430,14 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			}
 			m.detailMessage = fmt.Sprintf("Removed prefix %s", p.prefix)
 		}
+	case "f":
+		// Open file browser at root of bucket
+		m.mode = bucketBrowse
+		m.browsePrefix = ""
+		m.browseCursor = 0
+		m.browseOffset = 0
+		m.loading = true
+		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 	case "r":
 		m.loading = true
 		m.detailMessage = ""
@@ -582,6 +606,8 @@ func (m bucketsModel) view() string {
 	switch m.mode {
 	case bucketDetail, bucketDetailAddPrefix, bucketDetailConfirm:
 		return m.viewDetail()
+	case bucketBrowse:
+		return m.viewBrowse()
 	default:
 		return m.viewList()
 	}
@@ -792,7 +818,7 @@ func (m bucketsModel) viewDetail() string {
 		return s
 	}
 
-	s += "\n" + helpStyle.Render("  [enter] Toggle access  [p] Add prefix  [d] Delete prefix  [r] Refresh  [esc] Back")
+	s += "\n" + helpStyle.Render("  [enter] Toggle access  [f] Browse files  [p] Add prefix  [d] Delete prefix  [r] Refresh  [esc] Back")
 	return s
 }
 
@@ -802,4 +828,163 @@ func accessWord(public bool) string {
 		return warningStyle.Render("PUBLIC")
 	}
 	return dimStyle.Render("PRIVATE")
+}
+
+// --- File Browser ---
+
+func (m bucketsModel) loadBrowse() tea.Cmd {
+	bucket := m.items[m.cursor]
+	prefix := m.browsePrefix
+	return func() tea.Msg {
+		ctx := context.Background()
+		items, err := m.client.ListContents(ctx, bucket.name, prefix, bucket.region)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return browseLoadedMsg{items: items}
+	}
+}
+
+func (m bucketsModel) browseVisibleRows() int {
+	overhead := 6
+	avail := m.height - overhead
+	if avail < 3 {
+		avail = 3
+	}
+	return avail
+}
+
+func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.browseCursor > 0 {
+			m.browseCursor--
+			if m.browseCursor < m.browseOffset {
+				m.browseOffset = m.browseCursor
+			}
+		}
+	case "down", "j":
+		if m.browseCursor < len(m.browseItems)-1 {
+			m.browseCursor++
+			visible := m.browseVisibleRows()
+			if m.browseCursor >= m.browseOffset+visible {
+				m.browseOffset = m.browseCursor - visible + 1
+			}
+		}
+	case "enter", "right", "l":
+		// Drill into folder
+		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
+			m.browsePrefix = m.browseItems[m.browseCursor].Key
+			m.loading = true
+			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+		}
+	case "esc", "left", "h":
+		// Go up one level, or back to detail view if at root
+		if m.browsePrefix == "" {
+			m.mode = bucketDetail
+			m.browseItems = nil
+			return m, nil
+		}
+		// Strip trailing slash, find parent
+		trimmed := strings.TrimSuffix(m.browsePrefix, "/")
+		lastSlash := strings.LastIndex(trimmed, "/")
+		if lastSlash >= 0 {
+			m.browsePrefix = trimmed[:lastSlash+1]
+		} else {
+			m.browsePrefix = ""
+		}
+		m.loading = true
+		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+	case "r":
+		m.loading = true
+		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+	}
+	return m, nil
+}
+
+func (m bucketsModel) viewBrowse() string {
+	if m.cursor >= len(m.items) {
+		return ""
+	}
+	bucket := m.items[m.cursor]
+
+	browseWidth := 80
+	if m.width > browseWidth {
+		browseWidth = m.width
+	}
+
+	// Breadcrumb
+	path := "/"
+	if m.browsePrefix != "" {
+		path = "/" + m.browsePrefix
+	}
+	s := breadcrumbStyle.Render(fmt.Sprintf("dashboard > buckets > %s > %s", bucket.name, path)) + "\n"
+	s += screenTitleStyle.Render(fmt.Sprintf("%s:%s", bucket.name, path)) + "\n"
+	s += separator(browseWidth) + "\n"
+
+	if m.loading {
+		s += fmt.Sprintf("\n %s Loading...\n", m.spinner.View())
+		return s
+	}
+
+	if len(m.browseItems) == 0 {
+		s += "\n " + dimStyle.Render("Empty — no files or folders here.") + "\n"
+		s += "\n" + helpStyle.Render(" [esc/←] Back  [r] Refresh  [q] Quit")
+		return s
+	}
+
+	// Header
+	header := fmt.Sprintf(" %s  %s  %s",
+		pad("NAME", 40),
+		padRight("SIZE", 10),
+		pad("MODIFIED", 20))
+	s += tableHeaderStyle.Width(browseWidth).Render(header) + "\n"
+
+	visible := m.browseVisibleRows()
+	end := m.browseOffset + visible
+	if end > len(m.browseItems) {
+		end = len(m.browseItems)
+	}
+
+	if m.browseOffset > 0 {
+		s += dimStyle.Render(fmt.Sprintf(" ▲ %d more above", m.browseOffset)) + "\n"
+	}
+
+	for i := m.browseOffset; i < end; i++ {
+		item := m.browseItems[i]
+		var icon, name, size, modified string
+
+		if item.IsFolder {
+			icon = "\U0001F4C1 " // folder emoji
+			name = item.Name
+			size = ""
+			modified = ""
+		} else {
+			icon = "   "
+			name = item.Name
+			size = formatSize(item.Size)
+			if !item.LastModified.IsZero() {
+				modified = item.LastModified.Format("2006-01-02 15:04")
+			}
+		}
+
+		display := icon + pad(name, 37)
+		row := fmt.Sprintf(" %s  %s  %s",
+			display,
+			padRight(size, 10),
+			pad(modified, 20))
+
+		if i == m.browseCursor {
+			s += rowSelectedStyle.Width(browseWidth).Render(row) + "\n"
+		} else {
+			s += rowStyle.Render(row) + "\n"
+		}
+	}
+
+	if end < len(m.browseItems) {
+		s += dimStyle.Render(fmt.Sprintf(" ▼ %d more below", len(m.browseItems)-end)) + "\n"
+	}
+
+	s += "\n" + helpStyle.Render(" [enter/→] Open folder  [esc/←] Back  [r] Refresh  [q] Quit")
+	return s
 }
