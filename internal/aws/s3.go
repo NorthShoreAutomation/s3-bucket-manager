@@ -3,10 +3,13 @@ package aws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/aws/smithy-go"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
@@ -102,18 +105,27 @@ func (c *Client) CreateBucket(ctx context.Context, name, region string) error {
 	return nil
 }
 
-// DeleteBucket deletes an S3 bucket. The bucket must be empty.
-// Uses the bucket's region to avoid 301 redirects for cross-region buckets.
+// DeleteBucket deletes an S3 bucket. Retries on 409 (BucketNotEmpty) since S3
+// is eventually consistent after emptying — objects may still appear briefly.
 func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
 	opts := func(o *s3.Options) {
 		if region != "" {
 			o.Region = region
 		}
 	}
-	_, err := c.S3.DeleteBucket(ctx, &s3.DeleteBucketInput{
-		Bucket: aws.String(name),
-	}, opts)
-	if err != nil {
+	for attempt := range 5 {
+		_, err := c.S3.DeleteBucket(ctx, &s3.DeleteBucketInput{
+			Bucket: aws.String(name),
+		}, opts)
+		if err == nil {
+			return nil
+		}
+		// Check if it's a 409 BucketNotEmpty — retry after a delay
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "BucketNotEmpty" && attempt < 4 {
+			time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+			continue
+		}
 		return fmt.Errorf("could not delete bucket %q: %w", name, err)
 	}
 	return nil
