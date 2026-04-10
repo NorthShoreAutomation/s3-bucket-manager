@@ -148,6 +148,12 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	case operationDoneMsg:
 		m.message = msg.message
 		m.detailMessage = msg.message
+		// If we were browsing files, reload the current directory
+		if m.browsePrefix != "" || len(m.browseItems) > 0 {
+			m.mode = bucketDetail
+			m.loading = true
+			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+		}
 		// If we're in detail view, reload prefixes
 		if m.mode == bucketDetail || m.mode == bucketDetailConfirm {
 			m.mode = bucketDetail
@@ -838,7 +844,7 @@ func (m bucketsModel) viewDetail() string {
 			}
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [r] Refresh  [esc] Prefix list")
+		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [d] Delete file  [r] Refresh  [esc] Prefix list")
 	} else {
 		// Prefix list
 		if len(m.prefixes) > 0 {
@@ -962,6 +968,25 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		// Enter toggles access on the current item if it's a folder
 		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
 			return m.toggleBrowseFolder()
+		}
+	case "d":
+		// Delete selected file (not folders)
+		if m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
+			item := m.browseItems[m.browseCursor]
+			bucket := m.items[m.cursor]
+			m.confirmAction = fmt.Sprintf("Delete file %q?", item.Name)
+			m.confirmFunc = func() tea.Msg {
+				ctx := context.Background()
+				err := m.client.DeleteObject(ctx, bucket.name, item.Key, bucket.region)
+				if err != nil {
+					return errMsg{err: err}
+				}
+				return operationDoneMsg{message: fmt.Sprintf("Deleted %s", item.Name)}
+			}
+			m.mode = bucketDetailConfirm
+			m.confirmInput2.SetValue("")
+			m.confirmInput2.Focus()
+			return m, textinput.Blink
 		}
 	case "r":
 		m.loading = true

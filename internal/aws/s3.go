@@ -131,6 +131,23 @@ func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
 	return nil
 }
 
+// DeleteObject deletes a single object from a bucket.
+func (c *Client) DeleteObject(ctx context.Context, bucket, key, region string) error {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+	_, err := c.S3.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}, opts)
+	if err != nil {
+		return fmt.Errorf("could not delete %q: %w", key, err)
+	}
+	return nil
+}
+
 // EmptyBucket deletes all objects (including versions) from a bucket.
 // onProgress is called after each batch with the total number of objects deleted so far.
 // Pass nil to skip progress reporting.
