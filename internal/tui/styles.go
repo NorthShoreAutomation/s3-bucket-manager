@@ -176,6 +176,13 @@ func formatSize(bytes int64) string {
 	}
 }
 
+func publicURL(bucket, prefix string) string {
+	if prefix == "" {
+		return fmt.Sprintf("https://%s.s3.amazonaws.com/", bucket)
+	}
+	return fmt.Sprintf("https://%s.s3.amazonaws.com/%s", bucket, prefix)
+}
+
 // Keep old function name working for other screens during transition
 func accessLabel(public bool) string {
 	return accessIcon(public)

@@ -636,16 +636,23 @@ func (m bucketsModel) viewList() string {
 		count := padRight(formatCount(b.objects), colCount)
 		size := padRight(formatSize(b.sizeBytes), colSize)
 		created := pad(b.created, colCreated)
+		url := ""
+		if b.isPublic {
+			url = "  " + dimStyle.Render(publicURL(b.name, ""))
+		}
 
 		if i == m.cursor {
 			icon := accessIconSelected(b.isPublic)
 			row := fmt.Sprintf(" %s  %s  %s  %s  %s  %s",
 				pad(name, colName), region, icon, count, size, created)
+			if b.isPublic {
+				row += "  " + publicURL(b.name, "")
+			}
 			s += rowSelectedStyle.Width(tableWidth).Render(row) + "\n"
 		} else {
 			icon := accessIcon(b.isPublic)
-			row := fmt.Sprintf(" %s  %s  %s  %s  %s  %s",
-				pad(name, colName), region, icon, count, size, created)
+			row := fmt.Sprintf(" %s  %s  %s  %s  %s  %s%s",
+				pad(name, colName), region, icon, count, size, created, url)
 			s += rowStyle.Render(row) + "\n"
 		}
 	}
@@ -694,6 +701,9 @@ func (m bucketsModel) viewDetail() string {
 
 	// Bucket-level access toggle (row 0)
 	bucketAccessLabel := accessIcon(bucket.isPublic) + " " + accessWord(bucket.isPublic)
+	if bucket.isPublic {
+		bucketAccessLabel += "  " + dimStyle.Render(publicURL(bucket.name, ""))
+	}
 	if m.detailCursor == 0 {
 		row := fmt.Sprintf("  Bucket Access: %s", bucketAccessLabel)
 		s += rowSelectedStyle.Width(detailWidth).Render(row) + "\n"
@@ -712,7 +722,11 @@ func (m bucketsModel) viewDetail() string {
 		for i, p := range m.prefixes {
 			icon := accessIcon(p.isPublic)
 			label := accessWord(p.isPublic)
-			row := fmt.Sprintf("    %s  %s %s", pad(p.prefix, 30), icon, label)
+			url := ""
+			if p.isPublic {
+				url = "  " + dimStyle.Render(publicURL(bucket.name, p.prefix))
+			}
+			row := fmt.Sprintf("    %s  %s %s%s", pad(p.prefix, 30), icon, label, url)
 			if m.detailCursor == i+1 {
 				s += rowSelectedStyle.Width(detailWidth).Render(row) + "\n"
 			} else {
