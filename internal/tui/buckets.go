@@ -200,16 +200,18 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 	switch msg.String() {
 	case "y", "Y":
 		bucket := m.items[m.cursor]
-		if bucket.objects > 0 {
-			m.message = fmt.Sprintf("Bucket %q has %d objects. Empty it first.", bucket.name, bucket.objects)
-			m.mode = bucketsList
-			return m, nil
-		}
 		m.loading = true
 		m.mode = bucketsList
 		return m, func() tea.Msg {
 			ctx := context.Background()
-			err := m.client.DeleteBucket(ctx, bucket.name, bucket.region)
+			empty, err := m.client.IsBucketEmpty(ctx, bucket.name, bucket.region)
+			if err != nil {
+				return errMsg{err: err}
+			}
+			if !empty {
+				return errMsg{err: fmt.Errorf("Bucket %q is not empty. Remove all objects first.", bucket.name)}
+			}
+			err = m.client.DeleteBucket(ctx, bucket.name, bucket.region)
 			if err != nil {
 				return errMsg{err: err}
 			}

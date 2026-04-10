@@ -119,6 +119,23 @@ func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
 	return nil
 }
 
+// IsBucketEmpty does a real-time check (not CloudWatch) for objects in a bucket.
+func (c *Client) IsBucketEmpty(ctx context.Context, name, region string) (bool, error) {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+	output, err := c.S3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(name),
+		MaxKeys: aws.Int32(1),
+	}, opts)
+	if err != nil {
+		return false, fmt.Errorf("could not check bucket contents: %w", err)
+	}
+	return aws.ToInt32(output.KeyCount) == 0, nil
+}
+
 // BucketStats holds pre-computed stats from CloudWatch.
 type BucketStats struct {
 	ObjectCount int64

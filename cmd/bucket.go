@@ -106,13 +106,23 @@ var bucketDeleteCmd = &cobra.Command{
 			return fmt.Errorf("Could not connect to AWS. Check your credentials.\n  Detail: %w", err)
 		}
 
-		count, err := client.GetBucketObjectCount(ctx, name)
+		// Look up bucket region to avoid cross-region 301 redirects
+		bucketRegion := client.Region
+		buckets, _ := client.ListBuckets(ctx)
+		for _, b := range buckets {
+			if b.Name == name {
+				bucketRegion = b.Region
+				break
+			}
+		}
+
+		// Real-time empty check (CloudWatch stats can be stale)
+		empty, err := client.IsBucketEmpty(ctx, name, bucketRegion)
 		if err != nil {
 			return fmt.Errorf("Could not check bucket contents: %w", err)
 		}
-
-		if count > 0 {
-			return fmt.Errorf("Bucket %q has %d objects. Empty it first before deleting.", name, count)
+		if !empty {
+			return fmt.Errorf("Bucket %q is not empty. Remove all objects first before deleting.", name)
 		}
 
 		if !deleteBucketYes {
@@ -122,16 +132,6 @@ var bucketDeleteCmd = &cobra.Command{
 			if confirm != "y" && confirm != "Y" {
 				fmt.Println("Cancelled.")
 				return nil
-			}
-		}
-
-		// Look up bucket region to avoid cross-region 301 redirects
-		bucketRegion := client.Region
-		buckets, _ := client.ListBuckets(ctx)
-		for _, b := range buckets {
-			if b.Name == name {
-				bucketRegion = b.Region
-				break
 			}
 		}
 
