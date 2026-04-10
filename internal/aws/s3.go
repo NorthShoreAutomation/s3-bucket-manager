@@ -103,10 +103,16 @@ func (c *Client) CreateBucket(ctx context.Context, name, region string) error {
 }
 
 // DeleteBucket deletes an S3 bucket. The bucket must be empty.
-func (c *Client) DeleteBucket(ctx context.Context, name string) error {
+// Uses the bucket's region to avoid 301 redirects for cross-region buckets.
+func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
 	_, err := c.S3.DeleteBucket(ctx, &s3.DeleteBucketInput{
 		Bucket: aws.String(name),
-	})
+	}, opts)
 	if err != nil {
 		return fmt.Errorf("could not delete bucket %q: %w", name, err)
 	}

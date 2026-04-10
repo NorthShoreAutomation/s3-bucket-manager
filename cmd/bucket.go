@@ -125,7 +125,17 @@ var bucketDeleteCmd = &cobra.Command{
 			}
 		}
 
-		err = client.DeleteBucket(ctx, name)
+		// Look up bucket region to avoid cross-region 301 redirects
+		bucketRegion := client.Region
+		buckets, _ := client.ListBuckets(ctx)
+		for _, b := range buckets {
+			if b.Name == name {
+				bucketRegion = b.Region
+				break
+			}
+		}
+
+		err = client.DeleteBucket(ctx, name, bucketRegion)
 		if err != nil {
 			return err
 		}

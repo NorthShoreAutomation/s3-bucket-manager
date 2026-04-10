@@ -209,7 +209,7 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 		m.mode = bucketsList
 		return m, func() tea.Msg {
 			ctx := context.Background()
-			err := m.client.DeleteBucket(ctx, bucket.name)
+			err := m.client.DeleteBucket(ctx, bucket.name, bucket.region)
 			if err != nil {
 				return errMsg{err: err}
 			}
