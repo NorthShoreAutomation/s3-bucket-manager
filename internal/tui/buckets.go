@@ -654,7 +654,7 @@ func (m bucketsModel) viewList() string {
 		s += dimStyle.Render(fmt.Sprintf(" ▼ %d more below", len(m.items)-end)) + "\n"
 	}
 
-	s += "\n" + helpStyle.Render(" [enter] Detail  [c] Create  [d] Delete  [r] Refresh  [esc] Back")
+	s += "\n" + helpStyle.Render(" [enter] Detail  [c] Create  [d] Delete  [r] Refresh  [u] Users  [q] Quit")
 	return s
 }
 

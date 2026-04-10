@@ -10,8 +10,7 @@ import (
 type screen int
 
 const (
-	screenDashboard screen = iota
-	screenBuckets
+	screenBuckets screen = iota
 	screenBucketDetail
 	screenUsers
 	screenUserDetail
@@ -22,32 +21,29 @@ const (
 
 // App is the root Bubble Tea model.
 type App struct {
-	client    *awsClient.Client
-	screen    screen
-	history   []screen
-	width     int
-	height    int
-	err       error
-	dashboard dashboardModel
-	buckets   bucketsModel
-	users     usersModel
-	creds     credentialsModel
-	showHelp  bool
+	client   *awsClient.Client
+	screen   screen
+	width    int
+	height   int
+	err      error
+	buckets  bucketsModel
+	users    usersModel
+	creds    credentialsModel
+	showHelp bool
 }
 
 // NewApp creates the root app model.
 func NewApp(client *awsClient.Client) App {
 	return App{
-		client:    client,
-		screen:    screenDashboard,
-		dashboard: newDashboardModel(client),
-		buckets:   newBucketsModel(client),
-		users:     newUsersModel(client),
+		client:  client,
+		screen:  screenBuckets,
+		buckets: newBucketsModel(client),
+		users:   newUsersModel(client),
 	}
 }
 
 func (a App) Init() tea.Cmd {
-	return a.dashboard.init()
+	return a.buckets.init()
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -55,8 +51,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
-		a.dashboard.width = msg.Width
-		a.dashboard.height = msg.Height
 		a.buckets.width = msg.Width
 		a.buckets.height = msg.Height
 		a.users.width = msg.Width
@@ -85,13 +79,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-	case dashboardLoadedMsg:
-		// Cache loaded data into sub-models so they don't re-fetch
-		a.buckets.items = msg.buckets
-		a.buckets.loading = false
-		a.users.items = msg.users
-		a.users.loading = false
-
 	case errMsg:
 		a.err = msg.err
 		return a, nil
@@ -100,8 +87,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Route to active screen
 	var cmd tea.Cmd
 	switch a.screen {
-	case screenDashboard:
-		a, cmd = a.updateDashboard(msg)
 	case screenBuckets, screenBucketDetail, screenCreateBucket:
 		a, cmd = a.updateBuckets(msg)
 	case screenUsers, screenUserDetail, screenCreateUser, screenCredentials:
@@ -118,8 +103,6 @@ func (a App) View() string {
 
 	var content string
 	switch a.screen {
-	case screenDashboard:
-		content = a.dashboard.view()
 	case screenBuckets, screenBucketDetail, screenCreateBucket:
 		content = a.buckets.view()
 	case screenUsers, screenUserDetail, screenCreateUser, screenCredentials:
@@ -157,58 +140,26 @@ func (a App) isTextInputActive() bool {
 		a.users.mode == usersCreateBuckets
 }
 
-func (a App) pushScreen(s screen) App {
-	a.history = append(a.history, a.screen)
-	a.screen = s
-	a.err = nil
-	return a
-}
-
-func (a App) popScreen() App {
-	if len(a.history) > 0 {
-		a.screen = a.history[len(a.history)-1]
-		a.history = a.history[:len(a.history)-1]
-	} else {
-		a.screen = screenDashboard
-	}
-	a.err = nil
-	return a
-}
-
 // Routing helpers
-
-func (a App) updateDashboard(msg tea.Msg) (App, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "b":
-			a = a.pushScreen(screenBuckets)
-			// Use cached data if available, otherwise fetch
-			if len(a.buckets.items) > 0 {
-				return a, nil
-			}
-			return a, a.buckets.init()
-		case "u":
-			a = a.pushScreen(screenUsers)
-			if len(a.users.items) > 0 {
-				return a, nil
-			}
-			return a, a.users.init()
-		}
-	}
-	var cmd tea.Cmd
-	a.dashboard, cmd = a.dashboard.update(msg)
-	return a, cmd
-}
 
 func (a App) updateBuckets(msg tea.Msg) (App, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Only intercept esc when in the default list mode;
-		// sub-modes (create, confirm delete) handle esc themselves.
-		if msg.String() == "esc" && a.buckets.mode == bucketsList {
-			a = a.popScreen()
-			return a, a.dashboard.init()
+		if !a.isTextInputActive() {
+			switch msg.String() {
+			case "u":
+				// Shortcut to users screen from bucket list
+				a.screen = screenUsers
+				if len(a.users.items) > 0 {
+					return a, nil
+				}
+				return a, a.users.init()
+			case "esc":
+				if a.buckets.mode == bucketsList {
+					// Bucket list is home — esc quits
+					return a, tea.Quit
+				}
+			}
 		}
 	}
 	var cmd tea.Cmd
@@ -220,8 +171,9 @@ func (a App) updateUsers(msg tea.Msg) (App, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if msg.String() == "esc" && a.users.mode == usersList {
-			a = a.popScreen()
-			return a, a.dashboard.init()
+			// Go back to bucket list
+			a.screen = screenBuckets
+			return a, nil
 		}
 	}
 	var cmd tea.Cmd
