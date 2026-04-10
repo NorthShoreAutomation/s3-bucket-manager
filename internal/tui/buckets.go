@@ -262,7 +262,7 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	case "r":
 		m.loading = true
 		return m, m.init()
-	case "enter":
+	case "enter", "right", "l":
 		if len(m.items) > 0 {
 			m.mode = bucketDetail
 			m.detailCursor = 0
@@ -731,7 +731,7 @@ func (m bucketsModel) viewList() string {
 		s += dimStyle.Render(fmt.Sprintf(" ▼ %d more below", len(m.items)-end)) + "\n"
 	}
 
-	s += "\n" + helpStyle.Render(" [enter] Detail  [c] Create  [d] Delete  [r] Refresh  [u] Users  [q] Quit")
+	s += "\n" + helpStyle.Render(" [enter/→] Detail  [c] Create  [d] Delete  [r] Refresh  [u] Users  [q] Quit")
 	return s
 }
 
