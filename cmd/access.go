@@ -29,14 +29,9 @@ var accessShowCmd = &cobra.Command{
 			return fmt.Errorf("Could not connect to AWS. Check your credentials.\n  Detail: %w", err)
 		}
 
-		// Look up bucket region for cross-region support
-		bucketRegion := client.Region
-		buckets, _ := client.ListBuckets(ctx)
-		for _, b := range buckets {
-			if b.Name == bucket {
-				bucketRegion = b.Region
-				break
-			}
+		bucketRegion, err := client.GetBucketRegion(ctx, bucket)
+		if err != nil {
+			return err
 		}
 
 		prefixes, err := client.ListPrefixes(ctx, bucket, bucketRegion)
@@ -49,7 +44,7 @@ var accessShowCmd = &cobra.Command{
 			return nil
 		}
 
-		accesses, err := client.GetPrefixAccessStatus(ctx, bucket, prefixes)
+		accesses, err := client.GetPrefixAccessStatus(ctx, bucket, bucketRegion, prefixes)
 		if err != nil {
 			return err
 		}
@@ -106,6 +101,10 @@ var accessSetCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("Could not connect to AWS. Check your credentials.\n  Detail: %w", err)
 		}
+		bucketRegion, err := client.GetBucketRegion(ctx, bucket)
+		if err != nil {
+			return err
+		}
 
 		if accessPublic && !accessYes {
 			fmt.Printf("Make %s PUBLIC? Anyone on the internet will be able to read its contents. [y/N]: ", target)
@@ -124,7 +123,7 @@ var accessSetCmd = &cobra.Command{
 
 		if accessPublic {
 			// For whole bucket, use empty prefix which results in bucket/*
-			err = client.SetPrefixPublic(ctx, bucket, prefix)
+			err = client.SetPrefixPublic(ctx, bucket, prefix, bucketRegion)
 			if err != nil {
 				return err
 			}
@@ -133,7 +132,7 @@ var accessSetCmd = &cobra.Command{
 			}
 			fmt.Printf("Set %s to PUBLIC\n", target)
 		} else {
-			err = client.SetPrefixPrivate(ctx, bucket, prefix)
+			err = client.SetPrefixPrivate(ctx, bucket, prefix, bucketRegion)
 			if err != nil {
 				return err
 			}

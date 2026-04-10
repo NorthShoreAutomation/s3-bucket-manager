@@ -2,7 +2,10 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -240,7 +243,16 @@ func (m usersModel) updateConfirmDelete(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 func (m usersModel) updateShowCreds(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 	switch msg.String() {
 	case "s":
+		path, err := saveCredentialsToFile(m.creds.username, m.creds.accessKeyID, m.creds.secretKey)
+		if err != nil {
+			m.creds.saved = false
+			m.creds.savePath = ""
+			m.creds.saveError = err.Error()
+			return m, nil
+		}
 		m.creds.saved = true
+		m.creds.savePath = path
+		m.creds.saveError = ""
 		return m, nil
 	case "esc", "enter":
 		m.mode = usersList
@@ -320,9 +332,36 @@ func (m usersModel) viewCredentials() string {
 	s += warningStyle.Render("  WARNING: This is the only time the secret key will be shown.") + "\n\n"
 
 	if m.creds.saved {
-		s += successStyle.Render("  Credentials saved!") + "\n\n"
+		s += successStyle.Render(fmt.Sprintf("  Credentials saved to %s", m.creds.savePath)) + "\n\n"
+	}
+	if m.creds.saveError != "" {
+		s += errorStyle.Render("  "+m.creds.saveError) + "\n\n"
 	}
 
 	s += helpStyle.Render("[s] Save to file  [esc] Done")
 	return s
+}
+
+func saveCredentialsToFile(username, keyID, secret string) (string, error) {
+	filename := fmt.Sprintf("%s-credentials.json", username)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("could not resolve home directory: %w", err)
+	}
+	path := filepath.Join(home, filename)
+
+	data := map[string]string{
+		"username":          username,
+		"access_key_id":     keyID,
+		"secret_access_key": secret,
+	}
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("could not encode credentials: %w", err)
+	}
+
+	if err := os.WriteFile(path, jsonData, 0600); err != nil {
+		return "", fmt.Errorf("could not save credentials: %w", err)
+	}
+	return path, nil
 }

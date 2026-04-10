@@ -68,12 +68,13 @@ type bucketsModel struct {
 	detailMessage string          // status message in detail view
 
 	// File browser fields
-	browsePrefix    string                 // current prefix being browsed (empty = root)
-	browseItems     []awsClient.BrowseItem // folders + files at current prefix
-	browseCursor    int                    // cursor in browse view
-	browseOffset    int                    // scroll offset in browse view
-	folderDeleteKey string                 // key of folder being deleted
-	folderDeleteCnt int64                  // object count for folder delete confirm
+	browsePrefix       string                 // current prefix being browsed (empty = root)
+	browseItems        []awsClient.BrowseItem // folders + files at current prefix
+	browseCursor       int                    // cursor in browse view
+	browseOffset       int                    // scroll offset in browse view
+	folderDeleteKey    string                 // key of folder being deleted
+	folderDeleteCnt    int64                  // object count for folder delete confirm
+	folderDeletePublic bool                   // whether the folder being deleted also has public access
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -202,6 +203,7 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.loading = false
 		m.folderDeleteKey = msg.key
 		m.folderDeleteCnt = msg.count
+		m.folderDeletePublic = msg.isPublic
 		m.mode = bucketDetailDeleteFolder
 		m.deleteInput.SetValue("")
 		m.deleteInput.Focus()
@@ -452,23 +454,17 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		if m.detailCursor > 0 && m.detailCursor <= len(m.prefixes) {
 			idx := m.detailCursor - 1
 			p := m.prefixes[idx]
-			if p.isPublic {
-				bucket := m.items[m.cursor]
-				m.loading = true
-				return m, func() tea.Msg {
-					ctx := context.Background()
-					err := m.client.SetPrefixPrivate(ctx, bucket.name, p.prefix)
-					if err != nil {
-						return errMsg{err: err}
-					}
-					return operationDoneMsg{message: fmt.Sprintf("Removed prefix %s", p.prefix)}
+			bucket := m.items[m.cursor]
+			m.loading = true
+			m.deleteProgress = "Counting objects..."
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				ctx := context.Background()
+				count, err := m.client.CountObjects(ctx, bucket.name, p.prefix, bucket.region)
+				if err != nil {
+					return errMsg{err: err}
 				}
-			}
-			m.prefixes = append(m.prefixes[:idx], m.prefixes[idx+1:]...)
-			if m.detailCursor > len(m.prefixes) {
-				m.detailCursor = len(m.prefixes)
-			}
-			m.detailMessage = fmt.Sprintf("Removed prefix %s", p.prefix)
+				return folderCountedMsg{name: p.prefix, key: p.prefix, count: count, isPublic: p.isPublic}
+			})
 		}
 	case "r":
 		m.loading = true
@@ -494,7 +490,7 @@ func (m bucketsModel) toggleSelected() (bucketsModel, tea.Cmd) {
 			m.loading = true
 			return m, func() tea.Msg {
 				ctx := context.Background()
-				err := m.client.SetPrefixPrivate(ctx, bucket.name, "")
+				err := m.client.SetPrefixPrivate(ctx, bucket.name, "", bucket.region)
 				if err != nil {
 					return errMsg{err: err}
 				}
@@ -505,7 +501,7 @@ func (m bucketsModel) toggleSelected() (bucketsModel, tea.Cmd) {
 		m.confirmAction = fmt.Sprintf("This will make the ENTIRE bucket %q publicly readable.", bucket.name)
 		m.confirmFunc = func() tea.Msg {
 			ctx := context.Background()
-			err := m.client.SetPrefixPublic(ctx, bucket.name, "")
+			err := m.client.SetPrefixPublic(ctx, bucket.name, "", bucket.region)
 			if err != nil {
 				return errMsg{err: err}
 			}
@@ -529,7 +525,7 @@ func (m bucketsModel) toggleSelected() (bucketsModel, tea.Cmd) {
 		m.loading = true
 		return m, func() tea.Msg {
 			ctx := context.Background()
-			err := m.client.SetPrefixPrivate(ctx, bucket.name, p.prefix)
+			err := m.client.SetPrefixPrivate(ctx, bucket.name, p.prefix, bucket.region)
 			if err != nil {
 				return errMsg{err: err}
 			}
@@ -541,7 +537,7 @@ func (m bucketsModel) toggleSelected() (bucketsModel, tea.Cmd) {
 	m.confirmAction = fmt.Sprintf("Making %s%s public requires changing the bucket's public access settings.", bucket.name+"/", p.prefix)
 	m.confirmFunc = func() tea.Msg {
 		ctx := context.Background()
-		err := m.client.SetPrefixPublic(ctx, bucket.name, p.prefix)
+		err := m.client.SetPrefixPublic(ctx, bucket.name, p.prefix, bucket.region)
 		if err != nil {
 			return errMsg{err: err}
 		}
@@ -572,12 +568,17 @@ func (m bucketsModel) updateDetailAddPrefix(msg tea.KeyMsg) (bucketsModel, tea.C
 				return m, nil
 			}
 		}
-		m.prefixes = append(m.prefixes, prefixItem{prefix: name, isPublic: false})
-		m.detailMessage = fmt.Sprintf("Added prefix %s (private by default)", name)
+		bucket := m.items[m.cursor]
+		m.loading = true
 		m.mode = bucketDetail
-		// Move cursor to the new prefix
-		m.detailCursor = len(m.prefixes)
-		return m, nil
+		return m, func() tea.Msg {
+			ctx := context.Background()
+			err := m.client.CreatePrefix(ctx, bucket.name, name, bucket.region)
+			if err != nil {
+				return errMsg{err: err}
+			}
+			return operationDoneMsg{message: fmt.Sprintf("Added prefix %s (private by default)", name)}
+		}
 	case "esc":
 		m.mode = bucketDetail
 		return m, nil
@@ -619,7 +620,7 @@ func (m bucketsModel) loadPrefixes() tea.Cmd {
 		if err != nil {
 			return errMsg{err: err}
 		}
-		accesses, err := m.client.GetPrefixAccessStatus(ctx, bucket.name, prefixNames)
+		accesses, err := m.client.GetPrefixAccessStatus(ctx, bucket.name, bucket.region, prefixNames)
 		if err != nil {
 			return errMsg{err: err}
 		}
@@ -1031,7 +1032,12 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 					if err != nil {
 						return errMsg{err: err}
 					}
-					return folderCountedMsg{name: item.Name, key: item.Key, count: count}
+					accesses, err := m.client.GetPrefixAccessStatus(ctx, bucket.name, bucket.region, []string{item.Key})
+					if err != nil {
+						return errMsg{err: err}
+					}
+					isPublic := len(accesses) > 0 && accesses[0].IsPublic
+					return folderCountedMsg{name: item.Name, key: item.Key, count: count, isPublic: isPublic}
 				})
 			}
 			// File delete
@@ -1070,14 +1076,14 @@ func (m bucketsModel) toggleBrowseFolder() (bucketsModel, tea.Cmd) {
 	prefix := item.Key
 
 	// Check current access status
-	accesses, _ := m.client.GetPrefixAccessStatus(context.Background(), bucket.name, []string{prefix})
+	accesses, _ := m.client.GetPrefixAccessStatus(context.Background(), bucket.name, bucket.region, []string{prefix})
 	isPublic := len(accesses) > 0 && accesses[0].IsPublic
 
 	if isPublic {
 		m.loading = true
 		return m, func() tea.Msg {
 			ctx := context.Background()
-			err := m.client.SetPrefixPrivate(ctx, bucket.name, prefix)
+			err := m.client.SetPrefixPrivate(ctx, bucket.name, prefix, bucket.region)
 			if err != nil {
 				return errMsg{err: err}
 			}
@@ -1089,7 +1095,7 @@ func (m bucketsModel) toggleBrowseFolder() (bucketsModel, tea.Cmd) {
 	m.confirmAction = fmt.Sprintf("Making %s%s public requires changing the bucket's public access settings.", bucket.name+"/", prefix)
 	m.confirmFunc = func() tea.Msg {
 		ctx := context.Background()
-		err := m.client.SetPrefixPublic(ctx, bucket.name, prefix)
+		err := m.client.SetPrefixPublic(ctx, bucket.name, prefix, bucket.region)
 		if err != nil {
 			return errMsg{err: err}
 		}
@@ -1126,10 +1132,17 @@ func (m bucketsModel) updateDeleteFolder(msg tea.KeyMsg) (bucketsModel, tea.Cmd)
 			if err != nil {
 				return errMsg{err: err}
 			}
+			if m.folderDeletePublic {
+				err = m.client.SetPrefixPrivate(ctx, bucket.name, folderKey, bucket.region)
+				if err != nil {
+					return errMsg{err: err}
+				}
+			}
 			return operationDoneMsg{message: fmt.Sprintf("Deleted folder %s and all its contents", folderKey)}
 		}
 	case "esc":
 		m.deleteProgress = ""
+		m.folderDeletePublic = false
 		m.mode = bucketDetail
 		return m, nil
 	default:

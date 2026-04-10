@@ -26,6 +26,7 @@ type mockS3 struct {
 	getPublicAccessBlockOutput *s3.GetPublicAccessBlockOutput
 	getPublicAccessBlockErr    error
 	putPublicAccessBlockErr    error
+	putObjectErr               error
 	listObjectsV2Output        *s3.ListObjectsV2Output
 	getBucketPolicyOutput      *s3.GetBucketPolicyOutput
 	getBucketPolicyErr         error
@@ -47,6 +48,10 @@ func (m *mockS3) DeleteBucket(ctx context.Context, params *s3.DeleteBucketInput,
 
 func (m *mockS3) GetBucketLocation(ctx context.Context, params *s3.GetBucketLocationInput, optFns ...func(*s3.Options)) (*s3.GetBucketLocationOutput, error) {
 	return m.getBucketLocationOutput, nil
+}
+
+func (m *mockS3) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	return &s3.PutObjectOutput{}, m.putObjectErr
 }
 
 func (m *mockS3) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
@@ -228,7 +233,7 @@ func TestGetPrefixAccessStatus(t *testing.T) {
 	}
 	client := &Client{S3: mock}
 
-	accesses, err := client.GetPrefixAccessStatus(context.Background(), "my-bucket", []string{"installers/", "data/"})
+	accesses, err := client.GetPrefixAccessStatus(context.Background(), "my-bucket", "us-west-2", []string{"installers/", "data/"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -224,9 +224,10 @@ type browseLoadedMsg struct {
 }
 
 type folderCountedMsg struct {
-	name  string
-	key   string
-	count int64
+	name     string
+	key      string
+	count    int64
+	isPublic bool
 }
 
 type folderDeleteProgressMsg struct {

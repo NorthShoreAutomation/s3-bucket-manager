@@ -360,6 +360,22 @@ func (c *Client) GetBucketObjectCount(ctx context.Context, bucket, region string
 	return stats.ObjectCount, err
 }
 
+// GetBucketRegion returns the bucket's actual region.
+func (c *Client) GetBucketRegion(ctx context.Context, bucket string) (string, error) {
+	output, err := c.S3.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+		Bucket: aws.String(bucket),
+	})
+	if err != nil {
+		return "", fmt.Errorf("could not get region for %q: %w", bucket, err)
+	}
+
+	region := string(output.LocationConstraint)
+	if region == "" {
+		region = "us-east-1"
+	}
+	return region, nil
+}
+
 // ListPrefixes returns top-level prefixes (folders) in a bucket.
 func (c *Client) ListPrefixes(ctx context.Context, bucket, region string) ([]string, error) {
 	opts := func(o *s3.Options) {
@@ -380,6 +396,25 @@ func (c *Client) ListPrefixes(ctx context.Context, bucket, region string) ([]str
 		prefixes = append(prefixes, aws.ToString(p.Prefix))
 	}
 	return prefixes, nil
+}
+
+// CreatePrefix persists an empty folder marker object so the prefix appears in S3 listings.
+func (c *Client) CreatePrefix(ctx context.Context, bucket, prefix, region string) error {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+
+	_, err := c.S3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(prefix),
+		Body:   strings.NewReader(""),
+	}, opts)
+	if err != nil {
+		return fmt.Errorf("could not create prefix %q: %w", prefix, err)
+	}
+	return nil
 }
 
 // BrowseItem represents a folder or file in a bucket listing.
@@ -466,12 +501,17 @@ type policyStatement struct {
 }
 
 // GetPrefixAccessStatus checks which prefixes are public based on bucket policy.
-func (c *Client) GetPrefixAccessStatus(ctx context.Context, bucket string, prefixes []string) ([]model.PrefixAccess, error) {
+func (c *Client) GetPrefixAccessStatus(ctx context.Context, bucket, region string, prefixes []string) ([]model.PrefixAccess, error) {
 	publicPrefixes := make(map[string]bool)
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
 
 	policyOutput, err := c.S3.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
 		Bucket: aws.String(bucket),
-	})
+	}, opts)
 	if err == nil && policyOutput.Policy != nil {
 		var doc policyDocument
 		if jsonErr := json.Unmarshal([]byte(aws.ToString(policyOutput.Policy)), &doc); jsonErr == nil {
@@ -500,7 +540,13 @@ func (c *Client) GetPrefixAccessStatus(ctx context.Context, bucket string, prefi
 }
 
 // SetPrefixPublic makes a prefix publicly readable by adding a bucket policy statement.
-func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix string) error {
+func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix, region string) error {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+
 	// First ensure public access block allows public policies
 	_, err := c.S3.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{
 		Bucket: aws.String(bucket),
@@ -510,7 +556,7 @@ func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix string) err
 			IgnorePublicAcls:      aws.Bool(true),
 			RestrictPublicBuckets: aws.Bool(false), // Allow public access
 		},
-	})
+	}, opts)
 	if err != nil {
 		return fmt.Errorf("could not update public access settings: %w", err)
 	}
@@ -519,7 +565,7 @@ func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix string) err
 	doc := policyDocument{Version: "2012-10-17"}
 	policyOutput, err := c.S3.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
 		Bucket: aws.String(bucket),
-	})
+	}, opts)
 	if err == nil && policyOutput.Policy != nil {
 		json.Unmarshal([]byte(aws.ToString(policyOutput.Policy)), &doc) //nolint:errcheck // best-effort parse; empty doc is fine on failure
 	}
@@ -554,7 +600,7 @@ func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix string) err
 	_, err = c.S3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
 		Bucket: aws.String(bucket),
 		Policy: aws.String(string(policyJSON)),
-	})
+	}, opts)
 	if err != nil {
 		return fmt.Errorf("could not set prefix %q as public: %w", prefix, err)
 	}
@@ -562,12 +608,17 @@ func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix string) err
 }
 
 // SetPrefixPrivate removes the public access policy statement for a prefix.
-func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix string) error {
+func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix, region string) error {
 	sid := "s3m-public-" + strings.TrimSuffix(prefix, "/")
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
 
 	policyOutput, err := c.S3.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
 		Bucket: aws.String(bucket),
-	})
+	}, opts)
 	if err != nil {
 		return nil // No policy means already private
 	}
@@ -589,7 +640,7 @@ func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix string) er
 		// No statements left, delete the policy and re-block public access
 		c.S3.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{ //nolint:errcheck // best-effort cleanup when removing all public access
 			Bucket: aws.String(bucket),
-		})
+		}, opts)
 		c.S3.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{ //nolint:errcheck // best-effort restore of public access block
 			Bucket: aws.String(bucket),
 			PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{
@@ -598,7 +649,7 @@ func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix string) er
 				IgnorePublicAcls:      aws.Bool(true),
 				RestrictPublicBuckets: aws.Bool(true),
 			},
-		})
+		}, opts)
 		return nil
 	}
 
@@ -611,7 +662,7 @@ func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix string) er
 	_, err = c.S3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
 		Bucket: aws.String(bucket),
 		Policy: aws.String(string(policyJSON)),
-	})
+	}, opts)
 	if err != nil {
 		return fmt.Errorf("could not remove public access for prefix %q: %w", prefix, err)
 	}
