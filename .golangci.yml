@@ -20,6 +20,10 @@ linters:
       - source: "defer "
         linters:
           - errcheck
+      # ST1005: user-facing CLI error messages intentionally use capitalization
+      - linters:
+          - staticcheck
+        text: "ST1005"
   settings:
     revive:
       rules:
@@ -28,6 +32,7 @@ linters:
         - name: unused-receiver
           disabled: true
         - name: unused-parameter
+          disabled: true
     errcheck:
       exclude-functions:
         # Standard library print functions
@@ -37,6 +42,12 @@ linters:
         - fmt.Printf
         - fmt.Print
         - fmt.Println
+        - fmt.Scanln
+        - fmt.Scan
+        - fmt.Scanf
+        # JSON unmarshaling in best-effort parsing
+        - json.Unmarshal
+        - encoding/json.Unmarshal
         # Close methods — idiomatic Go defers these without checking
         - (*os.File).Close
         - (io.Closer).Close

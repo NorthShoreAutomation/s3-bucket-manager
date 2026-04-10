@@ -20,7 +20,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           echo "Validating PR title: $PR_TITLE"
-          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+'
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|ui)(\(.+\))?(!)?: .+'
           if [[ "$PR_TITLE" =~ $PATTERN ]]; then
             echo "✅ PR title follows conventional commit format"
           else
@@ -40,6 +40,7 @@ jobs:
             echo "  ci:       CI/CD configuration"
             echo "  chore:    Maintenance tasks"
             echo "  revert:   Reverting previous commit"
+            echo "  ui:        User interface changes"
             echo ""
             echo "Examples:"
             echo "  feat: add user authentication"
@@ -55,7 +56,7 @@ jobs:
         run: |
           echo "Validating commit messages..."
           echo ""
-          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+'
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|ui)(\(.+\))?(!)?: .+'
           MERGE_PATTERN='^Merge '
           COMMITS=$(git log --pretty=format:'%s' "$BASE_SHA".."$HEAD_SHA" --no-merges)
           if [[ -z "$COMMITS" ]]; then

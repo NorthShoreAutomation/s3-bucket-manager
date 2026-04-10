@@ -8,6 +8,7 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+
 	"github.com/dcorbell/s3m/internal/model"
 )
 
@@ -152,7 +153,7 @@ func (c *Client) DeleteManagedUser(ctx context.Context, username string) error {
 	})
 	if err == nil {
 		for _, p := range policiesOutput.PolicyNames {
-			c.IAM.DeleteUserPolicy(ctx, &iam.DeleteUserPolicyInput{
+			c.IAM.DeleteUserPolicy(ctx, &iam.DeleteUserPolicyInput{ //nolint:errcheck // best-effort cleanup during user deletion
 				UserName:   awssdk.String(username),
 				PolicyName: awssdk.String(p),
 			})
@@ -165,7 +166,7 @@ func (c *Client) DeleteManagedUser(ctx context.Context, username string) error {
 	})
 	if err == nil {
 		for _, k := range keysOutput.AccessKeyMetadata {
-			c.IAM.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
+			c.IAM.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{ //nolint:errcheck // best-effort cleanup during user deletion
 				UserName:    awssdk.String(username),
 				AccessKeyId: k.AccessKeyId,
 			})

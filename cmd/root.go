@@ -1,9 +1,10 @@
 package cmd
 
 import (
+	"github.com/spf13/cobra"
+
 	"github.com/dcorbell/s3m/internal/buildinfo"
 	"github.com/dcorbell/s3m/internal/tui"
-	"github.com/spf13/cobra"
 )
 
 var (

@@ -7,8 +7,9 @@ import (
 	"os"
 	"text/tabwriter"
 
-	awsClient "github.com/dcorbell/s3m/internal/aws"
 	"github.com/spf13/cobra"
+
+	awsClient "github.com/dcorbell/s3m/internal/aws"
 )
 
 var bucketCmd = &cobra.Command{

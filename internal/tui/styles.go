@@ -182,8 +182,3 @@ func publicURL(bucket, prefix string) string {
 	}
 	return fmt.Sprintf("https://%s.s3.amazonaws.com/%s", bucket, prefix)
 }
-
-// Keep old function name working for other screens during transition
-func accessLabel(public bool) string {
-	return accessIcon(public)
-}

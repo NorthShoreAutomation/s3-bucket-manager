@@ -4,6 +4,7 @@ import (
 	"context"
 
 	tea "github.com/charmbracelet/bubbletea"
+
 	awsClient "github.com/dcorbell/s3m/internal/aws"
 )
 
@@ -28,7 +29,6 @@ type App struct {
 	err      error
 	buckets  bucketsModel
 	users    usersModel
-	creds    credentialsModel
 	showHelp bool
 }
 

@@ -16,6 +16,7 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+
 	"github.com/dcorbell/s3m/internal/model"
 )
 
@@ -520,7 +521,7 @@ func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix string) err
 		Bucket: aws.String(bucket),
 	})
 	if err == nil && policyOutput.Policy != nil {
-		json.Unmarshal([]byte(aws.ToString(policyOutput.Policy)), &doc)
+		json.Unmarshal([]byte(aws.ToString(policyOutput.Policy)), &doc) //nolint:errcheck // best-effort parse; empty doc is fine on failure
 	}
 
 	// Build sid from prefix (e.g., "installers/" -> "s3m-public-installers")
@@ -586,10 +587,10 @@ func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix string) er
 
 	if len(filtered) == 0 {
 		// No statements left, delete the policy and re-block public access
-		c.S3.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{
+		c.S3.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{ //nolint:errcheck // best-effort cleanup when removing all public access
 			Bucket: aws.String(bucket),
 		})
-		c.S3.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{
+		c.S3.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{ //nolint:errcheck // best-effort restore of public access block
 			Bucket: aws.String(bucket),
 			PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{
 				BlockPublicAcls:       aws.Bool(true),

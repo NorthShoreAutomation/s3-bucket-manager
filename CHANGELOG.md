@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Resolved all golangci-lint errors: goimports formatting, errcheck exclusions, revive unused-parameter, ST1005 capitalized error strings, and removed unused code
+- Added `ui` as valid conventional commit type in commit-lint workflow
+
 ### Changed
 - Merged access control into bucket detail view; press Enter on a bucket to manage public/private access for the bucket and individual prefixes
 - Removed separate `[a] Access` screen from the dashboard
