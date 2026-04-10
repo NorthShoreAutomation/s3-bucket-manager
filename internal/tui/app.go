@@ -133,6 +133,7 @@ func (a App) viewHelp() string {
 // isTextInputActive returns true when the user is typing in a text field.
 func (a App) isTextInputActive() bool {
 	return a.buckets.mode == bucketsCreate ||
+		a.buckets.mode == bucketsTypeDelete ||
 		a.buckets.mode == bucketsConfirmDeleteNonEmpty ||
 		a.buckets.mode == bucketDetailAddPrefix ||
 		a.buckets.mode == bucketDetailConfirm ||

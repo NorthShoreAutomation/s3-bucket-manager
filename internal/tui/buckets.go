@@ -32,8 +32,9 @@ type bucketsMode int
 const (
 	bucketsList                  bucketsMode = iota
 	bucketsCreate                            // typing a new bucket name
-	bucketsConfirmDelete                     // y/N to delete empty bucket
-	bucketsConfirmDeleteNonEmpty             // type bucket name to confirm
+	bucketsTypeDelete                        // type 'delete' to start deletion
+	bucketsConfirmDelete                     // are you sure? [y/N]
+	bucketsConfirmDeleteNonEmpty             // type bucket name to confirm emptying
 	bucketDetail                             // viewing a single bucket's details
 	bucketDetailAddPrefix                    // typing a new prefix name
 	bucketDetailConfirm                      // type 'yes' to confirm access change
@@ -49,6 +50,7 @@ type bucketsModel struct {
 	height         int
 	mode           bucketsMode
 	nameInput      textinput.Model
+	deleteInput    textinput.Model // type 'delete' to start deletion
 	confirmInput   textinput.Model // type bucket name to confirm destructive delete
 	message        string
 	spinner        spinner.Model
@@ -68,6 +70,9 @@ func newBucketsModel(client *awsClient.Client) bucketsModel {
 	ti := textinput.New()
 	ti.Placeholder = "my-bucket-name"
 	ti.CharLimit = 63
+	di := textinput.New()
+	di.Placeholder = "type 'delete' to confirm"
+	di.CharLimit = 10
 	ci := textinput.New()
 	ci.Placeholder = "type bucket name to confirm"
 	ci.CharLimit = 63
@@ -83,6 +88,7 @@ func newBucketsModel(client *awsClient.Client) bucketsModel {
 	return bucketsModel{
 		client:        client,
 		nameInput:     ti,
+		deleteInput:   di,
 		confirmInput:  ci,
 		prefixInput:   pi,
 		confirmInput2: ci2,
@@ -177,6 +183,8 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			return m.updateList(msg)
 		case bucketsCreate:
 			return m.updateCreate(msg)
+		case bucketsTypeDelete:
+			return m.updateTypeDelete(msg)
 		case bucketsConfirmDelete:
 			return m.updateConfirmDelete(msg)
 		case bucketsConfirmDeleteNonEmpty:
@@ -227,7 +235,10 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		return m, textinput.Blink
 	case "d":
 		if len(m.items) > 0 {
-			m.mode = bucketsConfirmDelete
+			m.mode = bucketsTypeDelete
+			m.deleteInput.SetValue("")
+			m.deleteInput.Focus()
+			return m, textinput.Blink
 		}
 	case "r":
 		m.loading = true
@@ -271,6 +282,27 @@ func (m bucketsModel) updateCreate(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	}
 }
 
+func (m bucketsModel) updateTypeDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		typed := strings.TrimSpace(m.deleteInput.Value())
+		if typed != "delete" {
+			m.message = "You must type 'delete' to confirm. Cancelled."
+			m.mode = bucketsList
+			return m, nil
+		}
+		m.mode = bucketsConfirmDelete
+		return m, nil
+	case "esc":
+		m.mode = bucketsList
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.deleteInput, cmd = m.deleteInput.Update(msg)
+		return m, cmd
+	}
+}
+
 func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
@@ -284,7 +316,6 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 				return errMsg{err: err}
 			}
 			if !empty {
-				// Bucket has objects -- ask user to type name to confirm
 				return bucketNotEmptyMsg{name: bucket.name, region: bucket.region}
 			}
 			err = m.client.DeleteBucket(ctx, bucket.name, bucket.region)
@@ -576,9 +607,17 @@ func (m bucketsModel) viewList() string {
 		s += " " + m.nameInput.View() + "\n\n"
 		s += helpStyle.Render(" enter: create  esc: cancel")
 		return s
+	case bucketsTypeDelete:
+		if m.cursor < len(m.items) {
+			s += fmt.Sprintf("\n Delete bucket %s\n", warningStyle.Render(m.items[m.cursor].name))
+			s += " Type 'delete' to proceed:\n"
+			s += " " + m.deleteInput.View() + "\n\n"
+			s += helpStyle.Render(" enter: proceed  esc: cancel")
+		}
+		return s
 	case bucketsConfirmDelete:
 		if m.cursor < len(m.items) {
-			s += "\n " + warningStyle.Render(fmt.Sprintf("Delete bucket %q? [y/N]", m.items[m.cursor].name))
+			s += fmt.Sprintf("\n "+warningStyle.Render("Are you sure you want to delete %q?")+" [y/N]", m.items[m.cursor].name)
 		}
 		return s
 	case bucketsConfirmDeleteNonEmpty:
