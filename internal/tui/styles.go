@@ -7,19 +7,20 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// --- Color Palette (Tokyo Night-inspired, dark terminal safe) ---
+// --- Color Palette (Tokyo Night-inspired, boosted for readability) ---
 var (
-	colorPageTitle  = lipgloss.Color("#c0caf5") // bright, near-white
+	colorPageTitle  = lipgloss.Color("#e0e6f5") // near-white titles
 	colorPrimary    = lipgloss.Color("#7aa2f7") // bright blue
-	colorText       = lipgloss.Color("#a9b1d6") // primary text
-	colorDim        = lipgloss.Color("#565f89") // dimmed (breadcrumb, private, zero)
-	colorBorder     = lipgloss.Color("#3b4261") // separators, borders
-	colorHeaderBg   = lipgloss.Color("#1f2335") // header row shelf
+	colorText       = lipgloss.Color("#c8d0e8") // primary text — high contrast
+	colorMuted      = lipgloss.Color("#8690b2") // labels, help bar — readable but not loud
+	colorDim        = lipgloss.Color("#636d8c") // breadcrumb, zero counts — still visible
+	colorBorder     = lipgloss.Color("#4a5478") // separators, borders
+	colorHeaderBg   = lipgloss.Color("#232738") // header row shelf
 	colorSelectBg   = lipgloss.Color("#7aa2f7") // selected row bg
 	colorSelectFg   = lipgloss.Color("#1a1b26") // selected row text
 	colorSuccess    = lipgloss.Color("#73daca") // green for success messages
 	colorDanger     = lipgloss.Color("#f7768e") // red for errors
-	colorWarningTxt = lipgloss.Color("#e0af68") // warning text
+	colorWarningTxt = lipgloss.Color("#e0af68") // warning text / public indicator
 )
 
 // --- Shared Styles ---
@@ -38,7 +39,7 @@ var (
 			PaddingLeft(1)
 
 	helpStyle = lipgloss.NewStyle().
-			Foreground(colorDim)
+			Foreground(colorMuted)
 
 	errorStyle = lipgloss.NewStyle().
 			Foreground(colorDanger).

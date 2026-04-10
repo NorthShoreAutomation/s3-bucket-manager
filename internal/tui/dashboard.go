@@ -99,7 +99,7 @@ func (d dashboardModel) view() string {
 	s += separator(w) + "\n\n"
 
 	// Account info
-	labelStyle := lipgloss.NewStyle().Foreground(colorDim).Width(10)
+	labelStyle := lipgloss.NewStyle().Foreground(colorMuted).Width(10)
 	valueStyle := lipgloss.NewStyle().Foreground(colorText)
 	s += " " + labelStyle.Render("Profile") + valueStyle.Render(profileText) + "\n"
 	s += " " + labelStyle.Render("Region") + valueStyle.Render(d.client.Region) + "\n"
@@ -120,11 +120,12 @@ func (d dashboardModel) view() string {
 			Foreground(colorPrimary).
 			Bold(true)
 
+		mutedStyle := lipgloss.NewStyle().Foreground(colorMuted)
 		bucketBox := boxStyle.Render(
-			dimStyle.Render("Buckets") + "\n" +
+			mutedStyle.Render("Buckets") + "\n" +
 				countStyle.Render(fmt.Sprintf("  %d", d.bucketCount)))
 		userBox := boxStyle.Render(
-			dimStyle.Render("Users") + "\n" +
+			mutedStyle.Render("Users") + "\n" +
 				countStyle.Render(fmt.Sprintf("  %d", d.userCount)))
 
 		s += " " + lipgloss.JoinHorizontal(lipgloss.Top, bucketBox, userBox) + "\n"
