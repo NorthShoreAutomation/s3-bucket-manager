@@ -74,9 +74,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return a, tea.Quit
+		case "q":
+			// Quit from any screen, unless user is typing in a text input
+			if !a.isTextInputActive() {
+				return a, tea.Quit
+			}
 		case "?":
-			a.showHelp = !a.showHelp
-			return a, nil
+			if !a.isTextInputActive() {
+				a.showHelp = !a.showHelp
+				return a, nil
+			}
 		}
 
 		if a.showHelp {
@@ -151,6 +158,13 @@ func (a App) viewHelp() string {
 	return s
 }
 
+// isTextInputActive returns true when the user is typing in a text field.
+func (a App) isTextInputActive() bool {
+	return a.buckets.mode == bucketsCreate ||
+		a.users.mode == usersCreate ||
+		a.users.mode == usersCreateBuckets
+}
+
 func (a App) pushScreen(s screen) App {
 	a.history = append(a.history, a.screen)
 	a.screen = s
@@ -191,8 +205,6 @@ func (a App) updateDashboard(msg tea.Msg) (App, tea.Cmd) {
 		case "a":
 			a = a.pushScreen(screenAccess)
 			return a, a.access.init()
-		case "q":
-			return a, tea.Quit
 		}
 	}
 	var cmd tea.Cmd
