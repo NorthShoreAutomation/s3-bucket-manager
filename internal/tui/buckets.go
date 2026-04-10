@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -67,15 +68,23 @@ func (m bucketsModel) init() tea.Cmd {
 			return errMsg{err: err}
 		}
 		items := make([]bucketItem, len(buckets))
+		var wg sync.WaitGroup
 		for i, b := range buckets {
-			count, _ := m.client.GetBucketObjectCount(ctx, b.Name)
 			items[i] = bucketItem{
 				name:     b.Name,
 				region:   b.Region,
 				isPublic: b.IsPublic,
-				objects:  count,
+				created:  b.CreationDate.Format("2006-01-02"),
 			}
+			wg.Add(1)
+			go func(idx int, name string) {
+				defer wg.Done()
+				stats, _ := m.client.GetBucketStats(ctx, name)
+				items[idx].objects = stats.ObjectCount
+				items[idx].sizeBytes = stats.SizeBytes
+			}(i, b.Name)
 		}
+		wg.Wait()
 		return bucketsLoadedMsg{buckets: items}
 	})
 }
