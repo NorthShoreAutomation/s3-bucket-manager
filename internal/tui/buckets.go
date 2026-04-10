@@ -162,6 +162,9 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		if len(m.items) > 0 {
 			m.mode = bucketsConfirmDelete
 		}
+	case "r":
+		m.loading = true
+		return m, m.init()
 	}
 	return m, nil
 }
@@ -301,6 +304,6 @@ func (m bucketsModel) view() string {
 		s += dimStyle.Render(fmt.Sprintf(" ▼ %d more below", len(m.items)-end)) + "\n"
 	}
 
-	s += "\n" + helpStyle.Render(" [c] Create  [d] Delete  [esc] Back")
+	s += "\n" + helpStyle.Render(" [c] Create  [d] Delete  [r] Refresh  [esc] Back")
 	return s
 }
