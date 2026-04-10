@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-04-10
+### Added
+- s3m - Go TUI for S3 bucket, user, and access management (#1)
+
 ### Fixed
 - Resolved all golangci-lint errors: goimports formatting, errcheck exclusions, revive unused-parameter, ST1005 capitalized error strings, and removed unused code
 - Added `ui` as valid conventional commit type in commit-lint workflow
