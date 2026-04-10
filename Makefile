@@ -3,11 +3,14 @@ BUILD_DIR := bin
 INSTALL_DIR := $(HOME)/.local/bin
 MODULE    := github.com/dcorbell/s3m
 GOFLAGS   := -trimpath
+VERSION   := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT    := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
+LDFLAGS   := -X $(MODULE)/internal/buildinfo.Version=$(VERSION) -X $(MODULE)/internal/buildinfo.Commit=$(COMMIT) -X $(MODULE)/internal/buildinfo.Date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 .PHONY: build install uninstall test vet lint fmt clean run help
 
 build: ## Build the binary
-	go build $(GOFLAGS) -o $(BUILD_DIR)/$(BINARY) .
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) .
 
 install: build ## Build and install to ~/.local/bin
 	@mkdir -p $(INSTALL_DIR)

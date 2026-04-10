@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Extract release notes from CHANGELOG or tag annotation
+        id: release_notes
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # Extract the section for this version from CHANGELOG.md
+          # Matches from "## [VERSION]" to the next "## [" heading
+          awk '/^## \['"${VERSION}"'\]/{found=1; next} /^## \[/{if(found) exit} found{print}' CHANGELOG.md > /tmp/release_notes.md
+          # Trim leading/trailing blank lines
+          sed -i '/./,$!d' /tmp/release_notes.md
+          sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' /tmp/release_notes.md
+          if [[ -s /tmp/release_notes.md ]]; then
+            echo "Found release notes for v${VERSION} in CHANGELOG.md"
+            echo "has_notes=true" >> $GITHUB_OUTPUT
+          else
+            # Fall back to an annotated tag message when auto-release cannot
+            # update protected main with a changelog commit.
+            git for-each-ref "refs/tags/v${VERSION}" --format='%(contents)' | tail -n +2 > /tmp/release_notes.md
+            sed -i '/./,$!d' /tmp/release_notes.md
+            sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' /tmp/release_notes.md
+
+            if [[ -s /tmp/release_notes.md ]]; then
+              echo "Found release notes for v${VERSION} in tag annotation"
+              echo "has_notes=true" >> $GITHUB_OUTPUT
+            else
+              echo "No release notes found for v${VERSION}, using GoReleaser default"
+              echo "has_notes=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: >-
+            release --clean
+            ${{ steps.release_notes.outputs.has_notes == 'true' && '--release-notes /tmp/release_notes.md' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,45 @@
+# GoReleaser configuration for s3m
+# https://goreleaser.com/customization/
+
+version: 2
+project_name: s3m
+
+builds:
+  - main: .
+    binary: s3m
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X github.com/dcorbell/s3m/internal/buildinfo.Version={{.Version}}
+      - -X github.com/dcorbell/s3m/internal/buildinfo.Commit={{.Commit}}
+      - -X github.com/dcorbell/s3m/internal/buildinfo.Date={{.Date}}
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto

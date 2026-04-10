@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed separate `[a] Access` screen from the dashboard
 
 ### Added
+- GitHub Actions CI/CD: lint, test, build, and security (govulncheck) on PR/push
+- Conventional commit validation workflow for PR titles and commit messages
+- Auto-release workflow with semantic version bumping and CHANGELOG updates on push to main
+- GoReleaser-based release workflow triggered by tag push (darwin/linux, amd64/arm64)
+- Dependabot configuration for Go modules and GitHub Actions
+- Build version injection via ldflags (`s3m --version`)
 - Interactive TUI dashboard with Bubble Tea
 - TUI screens for buckets, users, and access control
 - CLI subcommands: `bucket list/create/delete`

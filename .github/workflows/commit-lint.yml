@@ -1,0 +1,88 @@
+name: Conventional Commits
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  validate:
+    name: Validate Commits
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "Validating PR title: $PR_TITLE"
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+'
+          if [[ "$PR_TITLE" =~ $PATTERN ]]; then
+            echo "✅ PR title follows conventional commit format"
+          else
+            echo "❌ PR title does not follow conventional commit format"
+            echo ""
+            echo "Expected format: <type>(<optional-scope>): <description>"
+            echo ""
+            echo "Valid types:"
+            echo "  feat:     New feature (triggers MINOR release)"
+            echo "  fix:      Bug fix (triggers PATCH release)"
+            echo "  docs:     Documentation only"
+            echo "  style:    Code style (formatting, semicolons, etc)"
+            echo "  refactor: Code refactoring (triggers PATCH release)"
+            echo "  perf:     Performance improvement (triggers PATCH release)"
+            echo "  test:     Adding/updating tests"
+            echo "  build:    Build system or dependencies"
+            echo "  ci:       CI/CD configuration"
+            echo "  chore:    Maintenance tasks"
+            echo "  revert:   Reverting previous commit"
+            echo ""
+            echo "Examples:"
+            echo "  feat: add user authentication"
+            echo "  fix(api): resolve timeout on large uploads"
+            echo "  feat!: change response format (breaking change)"
+            exit 1
+          fi
+
+      - name: Validate commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "Validating commit messages..."
+          echo ""
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+'
+          MERGE_PATTERN='^Merge '
+          COMMITS=$(git log --pretty=format:'%s' "$BASE_SHA".."$HEAD_SHA" --no-merges)
+          if [[ -z "$COMMITS" ]]; then
+            echo "No commits to validate"
+            exit 0
+          fi
+          FAILED=0
+          while IFS= read -r msg; do
+            if [[ "$msg" =~ $MERGE_PATTERN ]]; then
+              echo "⏭️  Skipping merge: $msg"
+              continue
+            fi
+            if [[ "$msg" =~ $PATTERN ]]; then
+              echo "✅ $msg"
+            else
+              echo "❌ $msg"
+              FAILED=1
+            fi
+          done <<< "$COMMITS"
+          echo ""
+          if [[ $FAILED -eq 1 ]]; then
+            echo "Some commits do not follow conventional commit format."
+            echo "See: https://www.conventionalcommits.org/"
+            echo ""
+            echo "Tip: You can fix commit messages with:"
+            echo "  git rebase -i HEAD~N  # where N is number of commits to fix"
+            echo "  # Change 'pick' to 'reword' for commits to fix"
+            exit 1
+          fi
+          echo "All commits follow conventional commit format!"

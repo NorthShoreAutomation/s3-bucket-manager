@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/dcorbell/s3m/internal/buildinfo"
 	"github.com/dcorbell/s3m/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +26,7 @@ func Execute() error {
 }
 
 func init() {
+	rootCmd.Version = buildinfo.Version
 	rootCmd.PersistentFlags().StringVar(&profile, "profile", "", "AWS profile name (default: from ~/.aws/credentials)")
 	rootCmd.PersistentFlags().StringVar(&region, "region", "", "AWS region (default: from profile or us-east-1)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOut, "json", false, "Output in JSON format")

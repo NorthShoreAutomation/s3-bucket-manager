@@ -1,0 +1,63 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - ineffassign
+    - errcheck
+    - revive
+    - unused
+  disable:
+    - depguard
+  exclusions:
+    rules:
+      # Defer close/cleanup — error is irrelevant after function returns
+      - source: "defer "
+        linters:
+          - errcheck
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: unused-receiver
+          disabled: true
+        - name: unused-parameter
+    errcheck:
+      exclude-functions:
+        # Standard library print functions
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Printf
+        - fmt.Print
+        - fmt.Println
+        # Close methods — idiomatic Go defers these without checking
+        - (*os.File).Close
+        - (io.Closer).Close
+        # OS cleanup functions
+        - os.Remove
+        - os.RemoveAll
+        - os.Chmod
+        # Cobra command methods
+        - (*github.com/spf13/cobra.Command).MarkFlagRequired
+        - (*github.com/spf13/cobra.Command).MarkFlagsRequiredTogether
+        - (*github.com/spf13/cobra.Command).MarkFlagsMutuallyExclusive
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/dcorbell/s3m
