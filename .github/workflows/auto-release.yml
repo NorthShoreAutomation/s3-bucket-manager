@@ -1,0 +1,288 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (analyze without creating release)"
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Get last release tag
+        id: last_release
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [[ -z "$LAST_TAG" ]]; then
+            echo "No previous tags found, this will be the first release"
+            LAST_TAG=$(git rev-list --max-parents=0 HEAD)
+            echo "is_first_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_first_release=false" >> $GITHUB_OUTPUT
+          fi
+          echo "tag=${LAST_TAG}" >> $GITHUB_OUTPUT
+          echo "Last release: ${LAST_TAG}"
+
+      - name: Analyze commits for version bump
+        id: version
+        run: |
+          LAST_TAG="${{ steps.last_release.outputs.tag }}"
+          IS_FIRST="${{ steps.last_release.outputs.is_first_release }}"
+
+          if [[ "$IS_FIRST" == "true" ]]; then
+            COMMITS=$(git log --pretty=format:'%s' --no-merges)
+          else
+            COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:'%s' --no-merges)
+          fi
+
+          if [[ -z "$COMMITS" ]]; then
+            echo "No new commits since last release"
+            echo "bump=none" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Commits to analyze:"
+          echo "$COMMITS"
+          echo ""
+
+          BUMP="none"
+
+          # Check for breaking changes (MAJOR)
+          if echo "$COMMITS" | grep -qE '^[a-z]+(\(.+\))?!:|BREAKING CHANGE:'; then
+            BUMP="major"
+            echo "Found breaking change -> MAJOR bump"
+          # Check for features (MINOR)
+          elif echo "$COMMITS" | grep -qE '^feat(\(.+\))?:'; then
+            BUMP="minor"
+            echo "Found feature -> MINOR bump"
+          # Check for fixes (PATCH)
+          elif echo "$COMMITS" | grep -qE '^fix(\(.+\))?:'; then
+            BUMP="patch"
+            echo "Found fix -> PATCH bump"
+          # Check for other releasable types
+          elif echo "$COMMITS" | grep -qE '^(perf|refactor)(\(.+\))?:'; then
+            BUMP="patch"
+            echo "Found perf/refactor -> PATCH bump"
+          fi
+
+          echo "bump=${BUMP}" >> $GITHUB_OUTPUT
+
+          if [[ "$IS_FIRST" == "true" ]]; then
+            CURRENT_VERSION="0.0.0"
+          else
+            CURRENT_VERSION="${LAST_TAG#v}"
+          fi
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          case "$BUMP" in
+            major)
+              NEW_VERSION="$((MAJOR + 1)).0.0"
+              ;;
+            minor)
+              NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
+              ;;
+            patch)
+              NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              ;;
+            *)
+              NEW_VERSION=""
+              ;;
+          esac
+
+          echo "current_version=${CURRENT_VERSION}" >> $GITHUB_OUTPUT
+          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo ""
+          echo "Version: ${CURRENT_VERSION} -> ${NEW_VERSION} (${BUMP})"
+
+      - name: Check if release needed
+        id: check
+        run: |
+          if [[ "${{ steps.version.outputs.bump }}" == "none" || -z "${{ steps.version.outputs.new_version }}" ]]; then
+            echo "No releasable changes found"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          elif git rev-parse "refs/tags/v${{ steps.version.outputs.new_version }}" >/dev/null 2>&1; then
+            echo "Tag v${{ steps.version.outputs.new_version }} already exists, skipping release"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Go
+        if: steps.check.outputs.should_release == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Gather commit details
+        if: steps.check.outputs.should_release == 'true'
+        id: commits
+        run: |
+          LAST_TAG="${{ steps.last_release.outputs.tag }}"
+          IS_FIRST="${{ steps.last_release.outputs.is_first_release }}"
+
+          if [[ "$IS_FIRST" == "true" ]]; then
+            RANGE=""
+          else
+            RANGE="${LAST_TAG}..HEAD"
+          fi
+
+          git log ${RANGE} --pretty=format:'%h|%an|%s' --no-merges > /tmp/commits.txt
+          COMMIT_COUNT=$(wc -l < /tmp/commits.txt | tr -d ' ')
+          echo "commit_count=${COMMIT_COUNT}" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        if: steps.check.outputs.should_release == 'true'
+        id: release_notes
+        run: |
+          RELEASE_NOTES=""
+
+          FEATURES=$(grep -E '\|feat(\(.+\))?:' /tmp/commits.txt | cut -d'|' -f3 | sed 's/^feat[^:]*: //' || true)
+          FIXES=$(grep -E '\|fix(\(.+\))?:' /tmp/commits.txt | cut -d'|' -f3 | sed 's/^fix[^:]*: //' || true)
+          PERFS=$(grep -E '\|(perf|refactor)(\(.+\))?:' /tmp/commits.txt | cut -d'|' -f3 | sed 's/^[a-z]*[^:]*: //' || true)
+
+          if [[ -n "$FEATURES" ]]; then
+            RELEASE_NOTES+="### Added\n"
+            while IFS= read -r line; do
+              [[ -n "$line" ]] && RELEASE_NOTES+="- ${line}\n"
+            done <<< "$FEATURES"
+            RELEASE_NOTES+="\n"
+          fi
+
+          if [[ -n "$PERFS" ]]; then
+            RELEASE_NOTES+="### Changed\n"
+            while IFS= read -r line; do
+              [[ -n "$line" ]] && RELEASE_NOTES+="- ${line}\n"
+            done <<< "$PERFS"
+            RELEASE_NOTES+="\n"
+          fi
+
+          if [[ -n "$FIXES" ]]; then
+            RELEASE_NOTES+="### Fixed\n"
+            while IFS= read -r line; do
+              [[ -n "$line" ]] && RELEASE_NOTES+="- ${line}\n"
+            done <<< "$FIXES"
+          fi
+
+          echo -e "$RELEASE_NOTES" > /tmp/release_notes.md
+          echo "=== Generated Release Notes ==="
+          cat /tmp/release_notes.md
+          echo "================================"
+
+      - name: Update CHANGELOG.md
+        if: steps.check.outputs.should_release == 'true' && github.event.inputs.dry_run != 'true' && github.ref == 'refs/heads/main'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          DATE=$(date -u +%Y-%m-%d)
+
+          # Insert new version section below ## [Unreleased]
+          awk -v ver="$NEW_VERSION" -v date="$DATE" -v notes="$(cat /tmp/release_notes.md)" '
+            /^## \[Unreleased\]/ {
+              print
+              print ""
+              print "## [" ver "] - " date
+              print notes
+              next
+            }
+            { print }
+          ' CHANGELOG.md > /tmp/CHANGELOG_new.md
+          mv /tmp/CHANGELOG_new.md CHANGELOG.md
+
+          echo "Updated CHANGELOG.md with v${NEW_VERSION}"
+
+      - name: Commit CHANGELOG update
+        if: steps.check.outputs.should_release == 'true' && github.event.inputs.dry_run != 'true' && github.ref == 'refs/heads/main'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          git add CHANGELOG.md
+          git commit -m "docs: update CHANGELOG.md for v${NEW_VERSION}" || echo "No CHANGELOG changes to commit"
+          git push origin main
+
+      - name: Prepare release tag message
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          NEW_TAG="v${NEW_VERSION}"
+
+          {
+            echo "Release ${NEW_TAG}"
+            echo ""
+            cat /tmp/release_notes.md
+          } > /tmp/tag_message.txt
+
+          echo "Prepared annotated tag message for ${NEW_TAG}"
+
+      - name: Show changes (Dry Run)
+        if: steps.check.outputs.should_release == 'true' && (github.event.inputs.dry_run == 'true' || github.ref != 'refs/heads/main')
+        run: |
+          echo "=== DRY RUN - Would create release ==="
+          echo "Version: v${{ steps.version.outputs.new_version }}"
+          echo "Bump type: ${{ steps.version.outputs.bump }}"
+          echo ""
+          echo "=== Release Notes ==="
+          cat /tmp/release_notes.md
+          echo ""
+          echo "=== Tag Message ==="
+          cat /tmp/tag_message.txt
+          echo "================================"
+
+      - name: Create and push release tag
+        if: steps.check.outputs.should_release == 'true' && github.event.inputs.dry_run != 'true' && github.ref == 'refs/heads/main'
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          NEW_TAG="v${NEW_VERSION}"
+
+          git tag -a "${NEW_TAG}" -F /tmp/tag_message.txt
+          git push origin "${NEW_TAG}"
+          echo "Created and pushed tag: ${NEW_TAG}"
+
+      - name: Summary
+        run: |
+          if [[ "${{ steps.check.outputs.should_release }}" == "true" ]]; then
+            echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
+              echo "**Mode:** Dry Run (no changes made)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "**Released:** v${{ steps.version.outputs.new_version }}" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "**Bump Type:** ${{ steps.version.outputs.bump }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Commits:** ${{ steps.commits.outputs.commit_count }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Release Notes" >> $GITHUB_STEP_SUMMARY
+            cat /tmp/release_notes.md >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## No Release Needed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No releasable commits found (feat, fix, perf, refactor, or breaking changes)." >> $GITHUB_STEP_SUMMARY
+          fi
