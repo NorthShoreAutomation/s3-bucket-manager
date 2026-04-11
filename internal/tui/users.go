@@ -101,6 +101,11 @@ func (m usersModel) init() tea.Cmd {
 
 func (m usersModel) update(msg tea.Msg) (usersModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case errMsg:
+		m.loading = false
+		m.detailLoading = false
+		return m, nil
+
 	case usersLoadedMsg:
 		m.items = msg.users
 		m.loading = false

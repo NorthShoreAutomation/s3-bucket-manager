@@ -156,6 +156,11 @@ func (m bucketsModel) init() tea.Cmd {
 
 func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case errMsg:
+		m.loading = false
+		m.bucketUsersLoading = false
+		return m, nil
+
 	case bucketsLoadedMsg:
 		m.items = msg.buckets
 		m.loading = false
