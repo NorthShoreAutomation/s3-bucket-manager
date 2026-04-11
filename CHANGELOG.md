@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Permission-level access management: `read`, `read-write`, `read-write-delete` permission levels for bucket access
+- New types: `PermissionLevel`, `BucketAccess`, `UserPermission` in data model
+- `GetUserBucketAccess` — parse IAM inline policy to determine per-bucket permissions
+- `SetUserBucketAccess` — set or remove per-bucket permission policies
+- `ListBucketUsers` — list all managed users with access to a given bucket
+- `--permission` flag on `s3m user create` (default: `read-write-delete`)
+- Legacy policy format detection for backward compatibility with existing users
+
+### Changed
+- `CreateManagedUser` now accepts `[]BucketAccess` with per-bucket permission levels instead of `[]string`
+- IAM policies now generate one statement per bucket with permission-scoped actions
+- `User.Buckets` field replaced with `User.BucketAccess` in data model
+- `GetUserPolicy` added to `IAMAPI` interface
+
 ## [0.1.0] - 2026-04-10
 ### Added
 - s3m - Go TUI for S3 bucket, user, and access management (#1)

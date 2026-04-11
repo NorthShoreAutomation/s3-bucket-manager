@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
+	"github.com/dcorbell/s3m/internal/model"
 )
 
 type userItem struct {
@@ -193,14 +194,18 @@ func (m usersModel) updateCreateBuckets(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 		}
 		username := strings.TrimSpace(m.nameInput.Value())
 		buckets := strings.Split(bucketsStr, ",")
-		for i := range buckets {
-			buckets[i] = strings.TrimSpace(buckets[i])
+		accesses := make([]model.BucketAccess, 0, len(buckets))
+		for _, b := range buckets {
+			accesses = append(accesses, model.BucketAccess{
+				Bucket:     strings.TrimSpace(b),
+				Permission: model.PermReadWriteDelete,
+			})
 		}
 		m.loading = true
 		m.mode = usersList
 		return m, func() tea.Msg {
 			ctx := context.Background()
-			key, err := m.client.CreateManagedUser(ctx, username, buckets)
+			key, err := m.client.CreateManagedUser(ctx, username, accesses)
 			if err != nil {
 				return errMsg{err: err}
 			}

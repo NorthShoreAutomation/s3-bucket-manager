@@ -3,7 +3,13 @@ package aws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
+	"strings"
+	"sync"
+
+	"github.com/aws/smithy-go"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -67,7 +73,7 @@ func (c *Client) isManaged(ctx context.Context, username string) bool {
 
 // CreateManagedUser creates an IAM user, tags it, creates an access key, and attaches
 // a policy granting access to the specified buckets.
-func (c *Client) CreateManagedUser(ctx context.Context, username string, buckets []string) (*model.AccessKey, error) {
+func (c *Client) CreateManagedUser(ctx context.Context, username string, accesses []model.BucketAccess) (*model.AccessKey, error) {
 	// Create the user
 	createOutput, err := c.IAM.CreateUser(ctx, &iam.CreateUserInput{
 		UserName: awssdk.String(username),
@@ -88,7 +94,7 @@ func (c *Client) CreateManagedUser(ctx context.Context, username string, buckets
 	}
 
 	// Attach bucket access policy
-	policyDoc := c.buildBucketPolicy(buckets)
+	policyDoc := buildBucketPolicyWithPermissions(accesses)
 	policyJSON, err := json.Marshal(policyDoc)
 	if err != nil {
 		return nil, fmt.Errorf("could not build policy: %w", err)
@@ -120,29 +126,235 @@ func (c *Client) CreateManagedUser(ctx context.Context, username string, buckets
 	}, nil
 }
 
-// buildBucketPolicy builds an IAM policy document granting S3 access to specific buckets.
-func (c *Client) buildBucketPolicy(buckets []string) map[string]interface{} {
-	bucketARNs := make([]string, 0, len(buckets)*2)
-	for _, b := range buckets {
-		bucketARNs = append(bucketARNs, fmt.Sprintf("arn:aws:s3:::%s", b))
-		bucketARNs = append(bucketARNs, fmt.Sprintf("arn:aws:s3:::%s/*", b))
+// actionsForPermission maps a permission level to the corresponding S3 IAM action strings.
+func actionsForPermission(level model.PermissionLevel) []string {
+	switch level {
+	case model.PermRead:
+		return []string{"s3:GetObject", "s3:ListBucket"}
+	case model.PermReadWrite:
+		return []string{
+			"s3:GetObject",
+			"s3:PutObject",
+			"s3:ListBucket",
+			"s3:AbortMultipartUpload",
+			"s3:ListMultipartUploadParts",
+			"s3:ListBucketMultipartUploads",
+		}
+	case model.PermReadWriteDelete:
+		return []string{
+			"s3:GetObject",
+			"s3:PutObject",
+			"s3:ListBucket",
+			"s3:AbortMultipartUpload",
+			"s3:ListMultipartUploadParts",
+			"s3:ListBucketMultipartUploads",
+			"s3:DeleteObject",
+		}
+	default:
+		return []string{"s3:GetObject", "s3:ListBucket"}
+	}
+}
+
+// permissionFromActions determines the permission level from a list of IAM actions.
+func permissionFromActions(actions []string) model.PermissionLevel {
+	actionSet := make(map[string]bool, len(actions))
+	for _, a := range actions {
+		actionSet[a] = true
+	}
+	if actionSet["s3:DeleteObject"] {
+		return model.PermReadWriteDelete
+	}
+	if actionSet["s3:PutObject"] {
+		return model.PermReadWrite
+	}
+	return model.PermRead
+}
+
+// buildBucketPolicyWithPermissions builds an IAM policy document with one statement per bucket,
+// each scoped to the permission level specified in the access list.
+func buildBucketPolicyWithPermissions(accesses []model.BucketAccess) map[string]interface{} {
+	statements := make([]map[string]interface{}, 0, len(accesses))
+	for _, a := range accesses {
+		statements = append(statements, map[string]interface{}{
+			"Sid":    fmt.Sprintf("s3m-%s", a.Bucket),
+			"Effect": "Allow",
+			"Action": actionsForPermission(a.Permission),
+			"Resource": []string{
+				fmt.Sprintf("arn:aws:s3:::%s", a.Bucket),
+				fmt.Sprintf("arn:aws:s3:::%s/*", a.Bucket),
+			},
+		})
+	}
+	return map[string]interface{}{
+		"Version":   "2012-10-17",
+		"Statement": statements,
+	}
+}
+
+// GetUserBucketAccess retrieves the bucket access list for a user by parsing their
+// s3m-bucket-access inline policy.
+func (c *Client) GetUserBucketAccess(ctx context.Context, username string) ([]model.BucketAccess, error) {
+	output, err := c.IAM.GetUserPolicy(ctx, &iam.GetUserPolicyInput{
+		UserName:   awssdk.String(username),
+		PolicyName: awssdk.String(policyName),
+	})
+	if err != nil {
+		// NoSuchEntity means no policy attached — return empty slice, not an error
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchEntity" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("could not get policy for user %q: %w", username, err)
 	}
 
-	return map[string]interface{}{
-		"Version": "2012-10-17",
-		"Statement": []map[string]interface{}{
-			{
-				"Effect": "Allow",
-				"Action": []string{
-					"s3:GetObject",
-					"s3:PutObject",
-					"s3:DeleteObject",
-					"s3:ListBucket",
-				},
-				"Resource": bucketARNs,
-			},
-		},
+	docStr, err := url.QueryUnescape(awssdk.ToString(output.PolicyDocument))
+	if err != nil {
+		return nil, fmt.Errorf("could not decode policy document: %w", err)
 	}
+
+	var doc struct {
+		Statement []struct {
+			Sid      string      `json:"Sid"`
+			Action   interface{} `json:"Action"`
+			Resource interface{} `json:"Resource"`
+		} `json:"Statement"`
+	}
+	if err := json.Unmarshal([]byte(docStr), &doc); err != nil {
+		return nil, fmt.Errorf("could not parse policy document: %w", err)
+	}
+
+	var accesses []model.BucketAccess
+	for _, stmt := range doc.Statement {
+		actions := toStringSlice(stmt.Action)
+		resources := toStringSlice(stmt.Resource)
+
+		// New format: Sid = "s3m-<bucketname>", one statement per bucket
+		if strings.HasPrefix(stmt.Sid, "s3m-") {
+			bucketName := strings.TrimPrefix(stmt.Sid, "s3m-")
+			accesses = append(accesses, model.BucketAccess{
+				Bucket:     bucketName,
+				Permission: permissionFromActions(actions),
+			})
+			continue
+		}
+
+		// Legacy format: one statement with multiple bucket ARNs, no Sid prefix
+		// Assign read-write-delete for legacy entries
+		seen := make(map[string]bool)
+		for _, r := range resources {
+			// Extract bucket name from ARN (arn:aws:s3:::bucket or arn:aws:s3:::bucket/*)
+			name := strings.TrimPrefix(r, "arn:aws:s3:::")
+			name = strings.TrimSuffix(name, "/*")
+			if name != "" && !seen[name] {
+				seen[name] = true
+				accesses = append(accesses, model.BucketAccess{
+					Bucket:     name,
+					Permission: model.PermReadWriteDelete,
+				})
+			}
+		}
+	}
+	return accesses, nil
+}
+
+// toStringSlice normalises a JSON value that may be a single string or []string.
+func toStringSlice(v interface{}) []string {
+	switch val := v.(type) {
+	case string:
+		return []string{val}
+	case []interface{}:
+		out := make([]string, 0, len(val))
+		for _, item := range val {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// SetUserBucketAccess replaces a user's bucket access policy. If accesses is empty,
+// the policy is deleted entirely.
+func (c *Client) SetUserBucketAccess(ctx context.Context, username string, accesses []model.BucketAccess) error {
+	if len(accesses) == 0 {
+		_, err := c.IAM.DeleteUserPolicy(ctx, &iam.DeleteUserPolicyInput{
+			UserName:   awssdk.String(username),
+			PolicyName: awssdk.String(policyName),
+		})
+		if err != nil {
+			var apiErr smithy.APIError
+			if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchEntity" {
+				return nil
+			}
+			return fmt.Errorf("could not delete policy for user %q: %w", username, err)
+		}
+		return nil
+	}
+
+	policyDoc := buildBucketPolicyWithPermissions(accesses)
+	policyJSON, err := json.Marshal(policyDoc)
+	if err != nil {
+		return fmt.Errorf("could not build policy: %w", err)
+	}
+	_, err = c.IAM.PutUserPolicy(ctx, &iam.PutUserPolicyInput{
+		UserName:       awssdk.String(username),
+		PolicyName:     awssdk.String(policyName),
+		PolicyDocument: awssdk.String(string(policyJSON)),
+	})
+	if err != nil {
+		return fmt.Errorf("could not set policy for user %q: %w", username, err)
+	}
+	return nil
+}
+
+// ListBucketUsers returns all managed users that have access to the given bucket,
+// along with their permission level.
+func (c *Client) ListBucketUsers(ctx context.Context, bucketName string) ([]model.UserPermission, error) {
+	users, err := c.ListManagedUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	type result struct {
+		perm     model.UserPermission
+		found    bool
+	}
+
+	results := make([]result, len(users))
+	var wg sync.WaitGroup
+	for i, u := range users {
+		wg.Add(1)
+		go func(idx int, username string) {
+			defer wg.Done()
+			accesses, err := c.GetUserBucketAccess(ctx, username)
+			if err != nil {
+				return
+			}
+			for _, a := range accesses {
+				if a.Bucket == bucketName {
+					results[idx] = result{
+						perm: model.UserPermission{
+							Username:   username,
+							Permission: a.Permission,
+						},
+						found: true,
+					}
+					return
+				}
+			}
+		}(i, u.Name)
+	}
+	wg.Wait()
+
+	var perms []model.UserPermission
+	for _, r := range results {
+		if r.found {
+			perms = append(perms, r.perm)
+		}
+	}
+	return perms, nil
 }
 
 // DeleteManagedUser removes a user's policies, access keys, and the user itself.
