@@ -230,7 +230,6 @@ func TestPermissionFromActions(t *testing.T) {
 	}
 }
 
-
 func TestGetUserBucketAccess(t *testing.T) {
 	// Build a policy with two statements (new format)
 	policy := map[string]interface{}{
