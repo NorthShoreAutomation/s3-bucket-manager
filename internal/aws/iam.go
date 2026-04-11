@@ -174,9 +174,9 @@ func permissionFromActions(actions []string) model.PermissionLevel {
 // each scoped to the permission level specified in the access list.
 func buildBucketPolicyWithPermissions(accesses []model.BucketAccess) map[string]interface{} {
 	statements := make([]map[string]interface{}, 0, len(accesses))
-	for _, a := range accesses {
+	for i, a := range accesses {
 		statements = append(statements, map[string]interface{}{
-			"Sid":    fmt.Sprintf("s3m-%s", a.Bucket),
+			"Sid":    fmt.Sprintf("s3m%d", i),
 			"Effect": "Allow",
 			"Action": actionsForPermission(a.Permission),
 			"Resource": []string{
@@ -227,29 +227,26 @@ func (c *Client) GetUserBucketAccess(ctx context.Context, username string) ([]mo
 	for _, stmt := range doc.Statement {
 		actions := toStringSlice(stmt.Action)
 		resources := toStringSlice(stmt.Resource)
+		perm := permissionFromActions(actions)
 
-		// New format: Sid = "s3m-<bucketname>", one statement per bucket
-		if strings.HasPrefix(stmt.Sid, "s3m-") {
-			bucketName := strings.TrimPrefix(stmt.Sid, "s3m-")
-			accesses = append(accesses, model.BucketAccess{
-				Bucket:     bucketName,
-				Permission: permissionFromActions(actions),
-			})
-			continue
-		}
+		// Extract bucket names from Resource ARNs.
+		// Each statement covers one bucket (new format) or multiple (legacy).
+		// Legacy statements (no s3m Sid prefix) are classified as read-write-delete.
+		isLegacy := !strings.HasPrefix(stmt.Sid, "s3m")
 
-		// Legacy format: one statement with multiple bucket ARNs, no Sid prefix
-		// Assign read-write-delete for legacy entries
 		seen := make(map[string]bool)
 		for _, r := range resources {
-			// Extract bucket name from ARN (arn:aws:s3:::bucket or arn:aws:s3:::bucket/*)
 			name := strings.TrimPrefix(r, "arn:aws:s3:::")
 			name = strings.TrimSuffix(name, "/*")
 			if name != "" && !seen[name] {
 				seen[name] = true
+				p := perm
+				if isLegacy {
+					p = model.PermReadWriteDelete
+				}
 				accesses = append(accesses, model.BucketAccess{
 					Bucket:     name,
-					Permission: model.PermReadWriteDelete,
+					Permission: p,
 				})
 			}
 		}

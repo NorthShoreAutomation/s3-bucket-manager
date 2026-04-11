@@ -237,7 +237,7 @@ func TestGetUserBucketAccess(t *testing.T) {
 		"Version": "2012-10-17",
 		"Statement": []map[string]interface{}{
 			{
-				"Sid":    "s3m-bucket-a",
+				"Sid":    "s3m0",
 				"Effect": "Allow",
 				"Action": []string{"s3:GetObject", "s3:ListBucket"},
 				"Resource": []string{
@@ -246,7 +246,7 @@ func TestGetUserBucketAccess(t *testing.T) {
 				},
 			},
 			{
-				"Sid":    "s3m-bucket-b",
+				"Sid":    "s3m1",
 				"Effect": "Allow",
 				"Action": []string{"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"},
 				"Resource": []string{
@@ -371,8 +371,8 @@ func TestSetUserBucketAccess(t *testing.T) {
 	if len(doc.Statement) != 2 {
 		t.Fatalf("expected 2 statements, got %d", len(doc.Statement))
 	}
-	if doc.Statement[0].Sid != "s3m-bucket-x" {
-		t.Errorf("statement[0].Sid: expected 's3m-bucket-x', got %q", doc.Statement[0].Sid)
+	if doc.Statement[0].Sid != "s3m0" {
+		t.Errorf("statement[0].Sid: expected 's3m0', got %q", doc.Statement[0].Sid)
 	}
 	if doc.Statement[0].Effect != "Allow" {
 		t.Errorf("statement[0].Effect: expected 'Allow', got %q", doc.Statement[0].Effect)
@@ -430,9 +430,9 @@ func TestBuildBucketPolicyWithPermissions(t *testing.T) {
 		sid         string
 		actionCount int
 	}{
-		{"s3m-read-bucket", 2},
-		{"s3m-rw-bucket", 6},
-		{"s3m-rwd-bucket", 7},
+		{"s3m0", 2},
+		{"s3m1", 6},
+		{"s3m2", 7},
 	}
 	for i, exp := range expectations {
 		if stmts[i]["Sid"] != exp.sid {
