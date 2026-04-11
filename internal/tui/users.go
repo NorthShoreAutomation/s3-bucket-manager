@@ -44,9 +44,8 @@ type usersModel struct {
 	width        int
 	height       int
 	mode         usersMode
-	nameInput    textinput.Model
-	bucketsInput textinput.Model
-	message      string
+	nameInput textinput.Model
+	message   string
 	creds        credentialsModel
 
 	// Detail view
@@ -67,15 +66,10 @@ func newUsersModel(client *awsClient.Client) usersModel {
 	ni.Placeholder = "username"
 	ni.CharLimit = 64
 
-	bi := textinput.New()
-	bi.Placeholder = "bucket1,bucket2"
-	bi.CharLimit = 256
-
 	return usersModel{
-		client:       client,
-		nameInput:    ni,
-		bucketsInput: bi,
-		loading:      true,
+		client:    client,
+		nameInput: ni,
+		loading:   true,
 	}
 }
 
@@ -149,6 +143,7 @@ func (m usersModel) update(msg tea.Msg) (usersModel, tea.Cmd) {
 				m.availableBuckets = append(m.availableBuckets, b)
 			}
 		}
+		m.loading = false
 		m.detailLoading = false
 		m.pickerCursor = 0
 		return m, nil
@@ -252,10 +247,25 @@ func (m usersModel) updateCreateName(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 		if name == "" {
 			return m, nil
 		}
+		// Load bucket list for the picker
 		m.mode = usersCreateBuckets
-		m.bucketsInput.SetValue("")
-		m.bucketsInput.Focus()
-		return m, textinput.Blink
+		m.pickerCursor = 0
+		m.loading = true
+		return m, func() tea.Msg {
+			ctx := context.Background()
+			buckets, err := m.client.ListBuckets(ctx)
+			if err != nil {
+				return errMsg{err: err}
+			}
+			items := make([]bucketItem, len(buckets))
+			for i, b := range buckets {
+				items[i] = bucketItem{
+					name:   b.Name,
+					region: b.Region,
+				}
+			}
+			return bucketPickerLoadedMsg{items: items}
+		}
 	case "esc":
 		m.mode = usersList
 		return m, nil
@@ -268,21 +278,25 @@ func (m usersModel) updateCreateName(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 
 func (m usersModel) updateCreateBuckets(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 	switch msg.String() {
-	case "enter":
-		bucketsStr := strings.TrimSpace(m.bucketsInput.Value())
-		if bucketsStr == "" {
-			return m, nil
+	case "up", "k":
+		if m.pickerCursor > 0 {
+			m.pickerCursor--
 		}
-		m.mode = usersCreatePerm
-		return m, nil
+	case "down", "j":
+		if m.pickerCursor < len(m.availableBuckets)-1 {
+			m.pickerCursor++
+		}
+	case "enter":
+		if len(m.availableBuckets) > 0 && m.pickerCursor < len(m.availableBuckets) {
+			m.pendingBucket = m.availableBuckets[m.pickerCursor].name
+			m.mode = usersCreatePerm
+		}
 	case "esc":
 		m.mode = usersList
-		return m, nil
-	default:
-		var cmd tea.Cmd
-		m.bucketsInput, cmd = m.bucketsInput.Update(msg)
-		return m, cmd
+		m.availableBuckets = nil
+		m.pickerCursor = 0
 	}
+	return m, nil
 }
 
 func (m usersModel) updateCreatePerm(msg tea.KeyMsg) (usersModel, tea.Cmd) {
@@ -296,23 +310,20 @@ func (m usersModel) updateCreatePerm(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 		perm = model.PermReadWriteDelete
 	case "esc":
 		m.mode = usersList
+		m.pendingBucket = ""
 		return m, nil
 	default:
 		return m, nil
 	}
 
 	username := strings.TrimSpace(m.nameInput.Value())
-	bucketsStr := strings.TrimSpace(m.bucketsInput.Value())
-	buckets := strings.Split(bucketsStr, ",")
-	accesses := make([]model.BucketAccess, 0, len(buckets))
-	for _, b := range buckets {
-		accesses = append(accesses, model.BucketAccess{
-			Bucket:     strings.TrimSpace(b),
-			Permission: perm,
-		})
+	accesses := []model.BucketAccess{
+		{Bucket: m.pendingBucket, Permission: perm},
 	}
 	m.loading = true
 	m.mode = usersList
+	m.pendingBucket = ""
+	m.availableBuckets = nil
 	return m, func() tea.Msg {
 		ctx := context.Background()
 		key, err := m.client.CreateManagedUser(ctx, username, accesses)
@@ -383,16 +394,43 @@ func (m usersModel) view() string {
 		s += helpStyle.Render("enter: next  esc: cancel")
 		return s
 	case usersCreateBuckets:
-		s += fmt.Sprintf("Buckets for %q (comma-separated):\n", m.nameInput.Value())
-		s += m.bucketsInput.View() + "\n\n"
-		s += helpStyle.Render("enter: next  esc: cancel")
+		s = breadcrumbStyle.Render("Dashboard > Users > New user > Select bucket") + "\n"
+		s += titleStyle.Render(fmt.Sprintf("Select a bucket for %q:", m.nameInput.Value())) + "\n\n"
+
+		if m.loading {
+			s += "  Loading buckets...\n"
+			return s
+		}
+
+		if len(m.availableBuckets) == 0 {
+			s += "  No buckets found. Create a bucket first.\n\n"
+			s += helpStyle.Render(" [esc] Back")
+			return s
+		}
+
+		for i, b := range m.availableBuckets {
+			cursor := "  "
+			if i == m.pickerCursor {
+				cursor = "> "
+			}
+			name := pad(b.name, 30)
+			region := b.region
+			if i == m.pickerCursor {
+				name = rowSelectedStyle.Render(pad(b.name, 30))
+				region = rowSelectedStyle.Render(b.region)
+			}
+			s += fmt.Sprintf("%s%s %s\n", cursor, name, region)
+		}
+
+		s += "\n" + helpStyle.Render(" [enter] Select  [esc] Cancel")
 		return s
 	case usersCreatePerm:
-		s += fmt.Sprintf("Permission level for %q buckets?\n\n", m.nameInput.Value())
+		s = breadcrumbStyle.Render("Dashboard > Users > New user > Permission") + "\n"
+		s += titleStyle.Render(fmt.Sprintf("Permission for %q:", m.pendingBucket)) + "\n\n"
 		s += "  [1] read\n"
 		s += "  [2] read-write\n"
 		s += "  [3] read-write-delete\n\n"
-		s += helpStyle.Render("Press 1, 2, or 3  [esc] Cancel")
+		s += helpStyle.Render(" Press 1, 2, or 3  [esc] Cancel")
 		return s
 	case usersConfirmDelete:
 		if m.cursor < len(m.items) {

@@ -142,8 +142,7 @@ func (a App) isTextInputActive() bool {
 		a.buckets.mode == bucketDetailPickUser ||
 		a.buckets.mode == bucketDetailPickPerm ||
 		a.buckets.mode == bucketDetailConfirmRemoveUser ||
-		a.users.mode == usersCreate ||
-		a.users.mode == usersCreateBuckets
+		a.users.mode == usersCreate
 }
 
 // Routing helpers
