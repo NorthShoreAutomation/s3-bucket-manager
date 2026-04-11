@@ -318,18 +318,25 @@ func (c *Client) ListBucketUsers(ctx context.Context, bucketName string) ([]mode
 	}
 
 	type result struct {
-		perm     model.UserPermission
-		found    bool
+		perm  model.UserPermission
+		found bool
 	}
 
 	results := make([]result, len(users))
-	var wg sync.WaitGroup
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
 	for i, u := range users {
 		wg.Add(1)
 		go func(idx int, username string) {
 			defer wg.Done()
 			accesses, err := c.GetUserBucketAccess(ctx, username)
 			if err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("%s: %w", username, err))
+				mu.Unlock()
 				return
 			}
 			for _, a := range accesses {
@@ -353,6 +360,10 @@ func (c *Client) ListBucketUsers(ctx context.Context, bucketName string) ([]mode
 		if r.found {
 			perms = append(perms, r.perm)
 		}
+	}
+
+	if len(errs) > 0 {
+		return perms, fmt.Errorf("failed to fetch access for %d user(s)", len(errs))
 	}
 	return perms, nil
 }

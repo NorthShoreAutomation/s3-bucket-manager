@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ type mockIAM struct {
 	listUserTagsOutput     *iam.ListUserTagsOutput
 	getUserPolicyOutput    *iam.GetUserPolicyOutput
 	getUserPolicyErr       error
+	getUserPolicyFunc      func(username string) (*iam.GetUserPolicyOutput, error)
 }
 
 func (m *mockIAM) CreateUser(ctx context.Context, params *iam.CreateUserInput, optFns ...func(*iam.Options)) (*iam.CreateUserOutput, error) {
@@ -80,6 +82,9 @@ func (m *mockIAM) DeleteUserPolicy(ctx context.Context, params *iam.DeleteUserPo
 }
 
 func (m *mockIAM) GetUserPolicy(ctx context.Context, params *iam.GetUserPolicyInput, optFns ...func(*iam.Options)) (*iam.GetUserPolicyOutput, error) {
+	if m.getUserPolicyFunc != nil {
+		return m.getUserPolicyFunc(awssdk.ToString(params.UserName))
+	}
 	return m.getUserPolicyOutput, m.getUserPolicyErr
 }
 
@@ -447,5 +452,89 @@ func TestBuildBucketPolicyWithPermissions(t *testing.T) {
 		if len(resources) != 2 {
 			t.Errorf("statement[%d] expected 2 resources, got %d", i, len(resources))
 		}
+	}
+}
+
+func TestListBucketUsers(t *testing.T) {
+	now := time.Now()
+
+	// Helper to build a URL-encoded policy document for a given set of bucket accesses.
+	buildEncodedPolicy := func(accesses []model.BucketAccess) string {
+		policy := buildBucketPolicyWithPermissions(accesses)
+		policyJSON, _ := json.Marshal(policy)
+		return url.QueryEscape(string(policyJSON))
+	}
+
+	// alice: has target-bucket with read
+	alicePolicy := buildEncodedPolicy([]model.BucketAccess{
+		{Bucket: "target-bucket", Permission: model.PermRead},
+	})
+	// bob: has target-bucket with read-write-delete
+	bobPolicy := buildEncodedPolicy([]model.BucketAccess{
+		{Bucket: "target-bucket", Permission: model.PermReadWriteDelete},
+	})
+	// charlie: has a different bucket only
+	charliePolicy := buildEncodedPolicy([]model.BucketAccess{
+		{Bucket: "other-bucket", Permission: model.PermReadWrite},
+	})
+
+	mock := &mockIAM{
+		listUsersOutput: &iam.ListUsersOutput{
+			Users: []iamtypes.User{
+				{UserName: awssdk.String("s3m-alice"), Arn: awssdk.String("arn:aws:iam::123:user/s3m-alice"), CreateDate: &now},
+				{UserName: awssdk.String("s3m-bob"), Arn: awssdk.String("arn:aws:iam::123:user/s3m-bob"), CreateDate: &now},
+				{UserName: awssdk.String("s3m-charlie"), Arn: awssdk.String("arn:aws:iam::123:user/s3m-charlie"), CreateDate: &now},
+			},
+		},
+		listUserTagsOutput: &iam.ListUserTagsOutput{
+			Tags: []iamtypes.Tag{
+				{Key: awssdk.String("s3m:managed"), Value: awssdk.String("true")},
+			},
+		},
+		listAccessKeysOutput: &iam.ListAccessKeysOutput{
+			AccessKeyMetadata: []iamtypes.AccessKeyMetadata{
+				{AccessKeyId: awssdk.String("AKIA123")},
+			},
+		},
+		getUserPolicyFunc: func(username string) (*iam.GetUserPolicyOutput, error) {
+			var encoded string
+			switch username {
+			case "s3m-alice":
+				encoded = alicePolicy
+			case "s3m-bob":
+				encoded = bobPolicy
+			case "s3m-charlie":
+				encoded = charliePolicy
+			default:
+				return nil, fmt.Errorf("unexpected user %q", username)
+			}
+			return &iam.GetUserPolicyOutput{
+				PolicyDocument: awssdk.String(encoded),
+			}, nil
+		},
+	}
+	client := &Client{IAM: mock}
+
+	perms, err := client.ListBucketUsers(context.Background(), "target-bucket")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(perms) != 2 {
+		t.Fatalf("expected 2 users with access, got %d", len(perms))
+	}
+
+	// Build a map for order-independent assertions (goroutines may return in any order).
+	permMap := make(map[string]model.PermissionLevel, len(perms))
+	for _, p := range perms {
+		permMap[p.Username] = p.Permission
+	}
+	if permMap["s3m-alice"] != model.PermRead {
+		t.Errorf("alice: expected %q, got %q", model.PermRead, permMap["s3m-alice"])
+	}
+	if permMap["s3m-bob"] != model.PermReadWriteDelete {
+		t.Errorf("bob: expected %q, got %q", model.PermReadWriteDelete, permMap["s3m-bob"])
+	}
+	if _, ok := permMap["s3m-charlie"]; ok {
+		t.Error("charlie should not have access to target-bucket")
 	}
 }
