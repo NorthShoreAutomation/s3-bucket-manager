@@ -27,6 +27,7 @@ const (
 	usersList usersMode = iota
 	usersCreate
 	usersCreateBuckets
+	usersCreatePerm
 	usersConfirmDelete
 	usersShowCreds
 	usersDetail
@@ -164,6 +165,8 @@ func (m usersModel) update(msg tea.Msg) (usersModel, tea.Cmd) {
 			return m.updateCreateName(msg)
 		case usersCreateBuckets:
 			return m.updateCreateBuckets(msg)
+		case usersCreatePerm:
+			return m.updateCreatePerm(msg)
 		case usersConfirmDelete:
 			return m.updateConfirmDelete(msg)
 		case usersShowCreds:
@@ -265,29 +268,8 @@ func (m usersModel) updateCreateBuckets(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 		if bucketsStr == "" {
 			return m, nil
 		}
-		username := strings.TrimSpace(m.nameInput.Value())
-		buckets := strings.Split(bucketsStr, ",")
-		accesses := make([]model.BucketAccess, 0, len(buckets))
-		for _, b := range buckets {
-			accesses = append(accesses, model.BucketAccess{
-				Bucket:     strings.TrimSpace(b),
-				Permission: model.PermReadWriteDelete,
-			})
-		}
-		m.loading = true
-		m.mode = usersList
-		return m, func() tea.Msg {
-			ctx := context.Background()
-			key, err := m.client.CreateManagedUser(ctx, username, accesses)
-			if err != nil {
-				return errMsg{err: err}
-			}
-			return credentialsMsg{
-				accessKeyID: key.AccessKeyID,
-				secretKey:   key.SecretAccessKey,
-				username:    username,
-			}
-		}
+		m.mode = usersCreatePerm
+		return m, nil
 	case "esc":
 		m.mode = usersList
 		return m, nil
@@ -295,6 +277,48 @@ func (m usersModel) updateCreateBuckets(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 		var cmd tea.Cmd
 		m.bucketsInput, cmd = m.bucketsInput.Update(msg)
 		return m, cmd
+	}
+}
+
+func (m usersModel) updateCreatePerm(msg tea.KeyMsg) (usersModel, tea.Cmd) {
+	var perm model.PermissionLevel
+	switch msg.String() {
+	case "1":
+		perm = model.PermRead
+	case "2":
+		perm = model.PermReadWrite
+	case "3":
+		perm = model.PermReadWriteDelete
+	case "esc":
+		m.mode = usersList
+		return m, nil
+	default:
+		return m, nil
+	}
+
+	username := strings.TrimSpace(m.nameInput.Value())
+	bucketsStr := strings.TrimSpace(m.bucketsInput.Value())
+	buckets := strings.Split(bucketsStr, ",")
+	accesses := make([]model.BucketAccess, 0, len(buckets))
+	for _, b := range buckets {
+		accesses = append(accesses, model.BucketAccess{
+			Bucket:     strings.TrimSpace(b),
+			Permission: perm,
+		})
+	}
+	m.loading = true
+	m.mode = usersList
+	return m, func() tea.Msg {
+		ctx := context.Background()
+		key, err := m.client.CreateManagedUser(ctx, username, accesses)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return credentialsMsg{
+			accessKeyID: key.AccessKeyID,
+			secretKey:   key.SecretAccessKey,
+			username:    username,
+		}
 	}
 }
 
@@ -356,7 +380,14 @@ func (m usersModel) view() string {
 	case usersCreateBuckets:
 		s += fmt.Sprintf("Buckets for %q (comma-separated):\n", m.nameInput.Value())
 		s += m.bucketsInput.View() + "\n\n"
-		s += helpStyle.Render("enter: create  esc: cancel")
+		s += helpStyle.Render("enter: next  esc: cancel")
+		return s
+	case usersCreatePerm:
+		s += fmt.Sprintf("Permission level for %q buckets?\n\n", m.nameInput.Value())
+		s += "  [1] read\n"
+		s += "  [2] read-write\n"
+		s += "  [3] read-write-delete\n\n"
+		s += helpStyle.Render("Press 1, 2, or 3  [esc] Cancel")
 		return s
 	case usersConfirmDelete:
 		if m.cursor < len(m.items) {
