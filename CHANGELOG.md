@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- TUI user detail view: press Enter on a user to see their bucket access list with permission levels
+- Add/remove/edit bucket access from the user detail view
+- Bucket picker for adding new bucket access to a user (loads available buckets, filters already-assigned)
+- Permission selector (1/2/3) for choosing read, read-write, or read-write-delete access
+- Cycle permission on existing bucket access by pressing Enter in the detail view
+- Confirmation prompt for removing bucket access
+- Key rotation available from the user detail view
 - Permission-level access management: `read`, `read-write`, `read-write-delete` permission levels for bucket access
 - New types: `PermissionLevel`, `BucketAccess`, `UserPermission` in data model
 - `GetUserBucketAccess` — parse IAM inline policy to determine per-bucket permissions

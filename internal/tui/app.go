@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
+	"github.com/dcorbell/s3m/internal/model"
 )
 
 type screen int
@@ -232,6 +233,20 @@ type folderCountedMsg struct {
 
 type folderDeleteProgressMsg struct {
 	deleted int64
+}
+
+type userAccessLoadedMsg struct {
+	username string
+	access   []model.BucketAccess
+}
+
+type bucketPickerLoadedMsg struct {
+	items []bucketItem
+}
+
+type accessUpdatedMsg struct {
+	access  []model.BucketAccess
+	message string
 }
 
 // prog holds the running tea.Program so goroutines can send progress messages.
