@@ -8,33 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Bucket detail view: USER ACCESS section showing which users have access and their permission levels
-- Add/remove users and cycle permissions directly from the bucket detail view
-- User picker for granting new user access to a bucket (filters out already-assigned users)
-- Permission picker (1/2/3) for selecting access level when adding a user to a bucket
-- Confirmation prompt for removing user access from a bucket
-- Context-sensitive help bar in bucket detail view (changes based on cursor section)
-- Concurrent loading of bucket users alongside prefixes when entering bucket detail
-- TUI user detail view: press Enter on a user to see their bucket access list with permission levels
-- Add/remove/edit bucket access from the user detail view
-- Bucket picker for adding new bucket access to a user (loads available buckets, filters already-assigned)
-- Permission selector (1/2/3) for choosing read, read-write, or read-write-delete access
-- Cycle permission on existing bucket access by pressing Enter in the detail view
-- Confirmation prompt for removing bucket access
-- Key rotation available from the user detail view
-- Permission-level access management: `read`, `read-write`, `read-write-delete` permission levels for bucket access
-- New types: `PermissionLevel`, `BucketAccess`, `UserPermission` in data model
-- `GetUserBucketAccess` — parse IAM inline policy to determine per-bucket permissions
-- `SetUserBucketAccess` — set or remove per-bucket permission policies
-- `ListBucketUsers` — list all managed users with access to a given bucket
-- `--permission` flag on `s3m user create` (default: `read-write-delete`)
-- Legacy policy format detection for backward compatibility with existing users
+- Per-bucket permission levels: `read`, `read-write`, `read-write-delete` for managed IAM users
+- Multi-part upload actions (AbortMultipartUpload, ListMultipartUploadParts, ListBucketMultipartUploads) included in write permission levels
+- TUI user detail view: press Enter on a user to see their bucket access with permission levels
+- TUI bucket detail view: USER ACCESS section showing assigned users and their permissions inline
+- Add, remove, and cycle permissions from both user detail and bucket detail views
+- Bucket picker and user picker for granting access (filters out already-assigned items)
+- Permission selector (1/2/3) during user creation and when adding access
+- Context-sensitive help bar in bucket detail view (adapts to cursor section)
+- `--permission` flag on `s3m user create` CLI command (default: `read-write-delete`)
+- Backward compatibility: existing users with legacy policies detected as `read-write-delete`
 
 ### Changed
-- `CreateManagedUser` now accepts `[]BucketAccess` with per-bucket permission levels instead of `[]string`
-- IAM policies now generate one statement per bucket with permission-scoped actions
-- `User.Buckets` field replaced with `User.BucketAccess` in data model
-- `GetUserPolicy` added to `IAMAPI` interface
+- IAM policies now generate one statement per bucket with permission-scoped actions (was single statement for all buckets)
+- User creation flow includes permission level selection step
+- `CreateManagedUser` accepts per-bucket permission levels instead of plain bucket names
 
 ## [0.1.0] - 2026-04-10
 ### Added
