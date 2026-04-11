@@ -139,6 +139,9 @@ func (a App) isTextInputActive() bool {
 		a.buckets.mode == bucketDetailAddPrefix ||
 		a.buckets.mode == bucketDetailConfirm ||
 		a.buckets.mode == bucketDetailDeleteFolder ||
+		a.buckets.mode == bucketDetailPickUser ||
+		a.buckets.mode == bucketDetailPickPerm ||
+		a.buckets.mode == bucketDetailConfirmRemoveUser ||
 		a.users.mode == usersCreate ||
 		a.users.mode == usersCreateBuckets
 }
@@ -247,6 +250,20 @@ type bucketPickerLoadedMsg struct {
 type accessUpdatedMsg struct {
 	access  []model.BucketAccess
 	message string
+}
+
+type bucketUsersLoadedMsg struct {
+	bucket string
+	users  []model.UserPermission
+}
+
+type userPickerLoadedMsg struct {
+	items []userItem
+}
+
+type bucketAccessUpdatedMsg struct {
+	message string
+	users   []model.UserPermission
 }
 
 // prog holds the running tea.Program so goroutines can send progress messages.

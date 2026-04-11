@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Bucket detail view: USER ACCESS section showing which users have access and their permission levels
+- Add/remove users and cycle permissions directly from the bucket detail view
+- User picker for granting new user access to a bucket (filters out already-assigned users)
+- Permission picker (1/2/3) for selecting access level when adding a user to a bucket
+- Confirmation prompt for removing user access from a bucket
+- Context-sensitive help bar in bucket detail view (changes based on cursor section)
+- Concurrent loading of bucket users alongside prefixes when entering bucket detail
 - TUI user detail view: press Enter on a user to see their bucket access list with permission levels
 - Add/remove/edit bucket access from the user detail view
 - Bucket picker for adding new bucket access to a user (loads available buckets, filters already-assigned)
