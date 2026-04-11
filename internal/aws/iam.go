@@ -25,32 +25,53 @@ const (
 )
 
 // ListManagedUsers returns IAM users tagged with s3m:managed=true.
+// Tag checks and key counts are fetched concurrently for speed.
 func (c *Client) ListManagedUsers(ctx context.Context) ([]model.User, error) {
 	output, err := c.IAM.ListUsers(ctx, &iam.ListUsersInput{})
 	if err != nil {
 		return nil, fmt.Errorf("could not list users: %w", err)
 	}
 
+	type result struct {
+		user    model.User
+		managed bool
+	}
+
+	results := make([]result, len(output.Users))
+	var wg sync.WaitGroup
+	for i, u := range output.Users {
+		wg.Add(1)
+		go func(idx int, u iamtypes.User) {
+			defer wg.Done()
+			username := awssdk.ToString(u.UserName)
+			if !c.isManaged(ctx, username) {
+				return
+			}
+			keyCount := 0
+			keysOutput, _ := c.IAM.ListAccessKeys(ctx, &iam.ListAccessKeysInput{
+				UserName: u.UserName,
+			})
+			if keysOutput != nil {
+				keyCount = len(keysOutput.AccessKeyMetadata)
+			}
+			results[idx] = result{
+				user: model.User{
+					Name:       username,
+					ARN:        awssdk.ToString(u.Arn),
+					CreateDate: awssdk.ToTime(u.CreateDate),
+					KeyCount:   keyCount,
+				},
+				managed: true,
+			}
+		}(i, u)
+	}
+	wg.Wait()
+
 	var users []model.User
-	for _, u := range output.Users {
-		if !c.isManaged(ctx, awssdk.ToString(u.UserName)) {
-			continue
+	for _, r := range results {
+		if r.managed {
+			users = append(users, r.user)
 		}
-
-		keysOutput, _ := c.IAM.ListAccessKeys(ctx, &iam.ListAccessKeysInput{
-			UserName: u.UserName,
-		})
-		keyCount := 0
-		if keysOutput != nil {
-			keyCount = len(keysOutput.AccessKeyMetadata)
-		}
-
-		users = append(users, model.User{
-			Name:       awssdk.ToString(u.UserName),
-			ARN:        awssdk.ToString(u.Arn),
-			CreateDate: awssdk.ToTime(u.CreateDate),
-			KeyCount:   keyCount,
-		})
 	}
 	return users, nil
 }
