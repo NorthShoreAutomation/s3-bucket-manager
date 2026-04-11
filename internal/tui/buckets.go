@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -133,7 +132,6 @@ func (m bucketsModel) init() tea.Cmd {
 			return errMsg{err: err}
 		}
 		items := make([]bucketItem, len(buckets))
-		var wg sync.WaitGroup
 		for i, b := range buckets {
 			items[i] = bucketItem{
 				name:     b.Name,
@@ -141,17 +139,29 @@ func (m bucketsModel) init() tea.Cmd {
 				isPublic: b.IsPublic,
 				created:  b.CreationDate.Format("2006-01-02"),
 			}
-			wg.Add(1)
-			go func(idx int, name, region string) {
-				defer wg.Done()
-				stats, _ := m.client.GetBucketStats(ctx, name, region)
-				items[idx].objects = stats.ObjectCount
-				items[idx].sizeBytes = stats.SizeBytes
-			}(i, b.Name, b.Region)
 		}
-		wg.Wait()
 		return bucketsLoadedMsg{buckets: items}
 	})
+}
+
+// loadBucketStatsCmd returns a command that fetches CloudWatch stats for all
+// buckets concurrently. Each bucket's stats arrive as a separate bucketStatsMsg
+// so the UI updates progressively.
+func (m bucketsModel) loadBucketStatsCmd() tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(m.items))
+	for _, b := range m.items {
+		name, region := b.name, b.region
+		cmds = append(cmds, func() tea.Msg {
+			ctx := context.Background()
+			stats, _ := m.client.GetBucketStats(ctx, name, region)
+			return bucketStatsMsg{
+				name:      name,
+				objects:   stats.ObjectCount,
+				sizeBytes: stats.SizeBytes,
+			}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
@@ -168,6 +178,17 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.deleteProgress = ""
 		if m.cursor >= len(m.items) {
 			m.cursor = max(0, len(m.items)-1)
+		}
+		// Kick off background stats fetch (CloudWatch) — list renders immediately
+		return m, m.loadBucketStatsCmd()
+
+	case bucketStatsMsg:
+		for i := range m.items {
+			if m.items[i].name == msg.name {
+				m.items[i].objects = msg.objects
+				m.items[i].sizeBytes = msg.sizeBytes
+				break
+			}
 		}
 		return m, nil
 

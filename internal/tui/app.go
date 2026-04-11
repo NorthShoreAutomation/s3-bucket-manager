@@ -195,6 +195,12 @@ type bucketsLoadedMsg struct {
 	buckets []bucketItem
 }
 
+type bucketStatsMsg struct {
+	name      string
+	objects   int64
+	sizeBytes int64
+}
+
 type bucketNotEmptyMsg struct {
 	name   string
 	region string
