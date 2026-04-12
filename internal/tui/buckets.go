@@ -31,18 +31,18 @@ type prefixItem struct {
 type bucketsMode int
 
 const (
-	bucketsList                  bucketsMode = iota
-	bucketsCreate                            // typing a new bucket name
-	bucketsTypeDelete                        // type 'delete' to start deletion
-	bucketsConfirmDelete                     // are you sure? [y/N]
-	bucketsConfirmDeleteNonEmpty             // type bucket name to confirm emptying
-	bucketDetail                             // viewing a single bucket's details
-	bucketDetailAddPrefix                    // typing a new prefix name
-	bucketDetailConfirm                      // type 'yes' to confirm access change
-	bucketDetailDeleteFolder                 // type 'delete' to confirm folder deletion
-	bucketDetailPickUser                     // selecting a user to add
-	bucketDetailPickPerm                     // choosing permission level for new user
-	bucketDetailConfirmRemoveUser            // confirm removing user access
+	bucketsList                   bucketsMode = iota
+	bucketsCreate                             // typing a new bucket name
+	bucketsTypeDelete                         // type 'delete' to start deletion
+	bucketsConfirmDelete                      // are you sure? [y/N]
+	bucketsConfirmDeleteNonEmpty              // type bucket name to confirm emptying
+	bucketDetail                              // viewing a single bucket's details
+	bucketDetailAddPrefix                     // typing a new prefix name
+	bucketDetailConfirm                       // type 'yes' to confirm access change
+	bucketDetailDeleteFolder                  // type 'delete' to confirm folder deletion
+	bucketDetailPickUser                      // selecting a user to add
+	bucketDetailPickPerm                      // choosing permission level for new user
+	bucketDetailConfirmRemoveUser             // confirm removing user access
 )
 
 type bucketUserItem struct {
@@ -78,7 +78,8 @@ type bucketsModel struct {
 	// Bucket user access
 	bucketUsers        []bucketUserItem // users with access to current bucket
 	bucketUsersLoading bool             // loading users separately
-	availableUsers     []userItem       // for the user picker (managed users not yet assigned)
+	bucketUsersError   string
+	availableUsers     []userItem // for the user picker (managed users not yet assigned)
 	userPickerCursor   int
 	pendingUser        string // user selected in picker, awaiting permission
 
@@ -162,6 +163,21 @@ func (m bucketsModel) loadBucketStatsCmd() tea.Cmd {
 		})
 	}
 	return tea.Batch(cmds...)
+}
+
+func (m bucketsModel) currentBucketName() string {
+	if m.cursor < 0 || m.cursor >= len(m.items) {
+		return ""
+	}
+	return m.items[m.cursor].name
+}
+
+func userPermsToItems(users []model.UserPermission) []bucketUserItem {
+	items := make([]bucketUserItem, len(users))
+	for i, u := range users {
+		items[i] = bucketUserItem{username: u.Username, permission: u.Permission}
+	}
+	return items
 }
 
 func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
@@ -252,14 +268,24 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, textinput.Blink
 
 	case bucketUsersLoadedMsg:
-		m.bucketUsers = make([]bucketUserItem, len(msg.users))
-		for i, u := range msg.users {
-			m.bucketUsers[i] = bucketUserItem{username: u.Username, permission: u.Permission}
+		if msg.bucket != m.currentBucketName() {
+			return m, nil
 		}
+		m.bucketUsersError = ""
+		if msg.err != nil {
+			m.bucketUsersError = msg.err.Error()
+			m.bucketUsers = nil
+			m.bucketUsersLoading = false
+			return m, nil
+		}
+		m.bucketUsers = userPermsToItems(msg.users)
 		m.bucketUsersLoading = false
 		return m, nil
 
 	case userPickerLoadedMsg:
+		if msg.bucket != m.currentBucketName() || m.mode != bucketDetailPickUser {
+			return m, nil
+		}
 		// Filter out users already assigned to this bucket
 		assigned := make(map[string]bool, len(m.bucketUsers))
 		for _, u := range m.bucketUsers {
@@ -276,10 +302,11 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case bucketAccessUpdatedMsg:
-		m.bucketUsers = make([]bucketUserItem, len(msg.users))
-		for i, u := range msg.users {
-			m.bucketUsers[i] = bucketUserItem{username: u.Username, permission: u.Permission}
+		if msg.bucket != m.currentBucketName() {
+			return m, nil
 		}
+		m.bucketUsers = userPermsToItems(msg.users)
+		m.bucketUsersError = ""
 		m.detailMessage = msg.message
 		m.loading = false
 		if m.detailCursor > len(m.bucketUsers) {
@@ -380,6 +407,7 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			m.loading = true
 			m.bucketUsers = nil
 			m.bucketUsersLoading = true
+			m.bucketUsersError = ""
 			return m, tea.Batch(m.spinner.Tick, m.loadPrefixes(), m.loadBucketUsers())
 		}
 	}
@@ -563,11 +591,21 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			if idx >= 0 && idx < len(m.bucketUsers) {
 				u := m.bucketUsers[idx]
 				newPerm := nextPermission(u.permission)
-				m.bucketUsers[idx].permission = newPerm
 				m.loading = true
 				m.detailMessage = ""
 				bucket := m.items[m.cursor]
 				username := u.username
+				updatedUsers := make([]model.UserPermission, 0, len(m.bucketUsers))
+				for i, item := range m.bucketUsers {
+					perm := item.permission
+					if i == idx {
+						perm = newPerm
+					}
+					updatedUsers = append(updatedUsers, model.UserPermission{
+						Username:   item.username,
+						Permission: perm,
+					})
+				}
 				return m, func() tea.Msg {
 					ctx := context.Background()
 					// Get user's full access, update this bucket's permission
@@ -590,11 +628,10 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 					if err != nil {
 						return errMsg{err: err}
 					}
-					// Reload bucket users
-					users, _ := m.client.ListBucketUsers(ctx, bucket.name)
 					return bucketAccessUpdatedMsg{
+						bucket:  bucket.name,
 						message: fmt.Sprintf("Updated %s to %s", username, newPerm),
-						users:   users,
+						users:   updatedUsers,
 					}
 				}
 			}
@@ -604,7 +641,7 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	case "a":
 		// Add user — available from bucket toggle or user section
 		section := m.cursorSection()
-		if section == "bucket" || section == "users" {
+		if (section == "bucket" || section == "users") && !m.bucketUsersLoading {
 			m.mode = bucketDetailPickUser
 			m.userPickerCursor = 0
 			m.loading = true
@@ -622,7 +659,7 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 						created:  u.CreateDate.Format("2006-01-02"),
 					}
 				}
-				return userPickerLoadedMsg{items: items}
+				return userPickerLoadedMsg{bucket: m.currentBucketName(), items: items}
 			}
 		}
 	case "d":
@@ -661,12 +698,14 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.loading = true
 		m.detailMessage = ""
 		m.bucketUsersLoading = true
+		m.bucketUsersError = ""
 		return m, tea.Batch(m.spinner.Tick, m.loadPrefixes(), m.loadBucketUsers())
 	case "left", "h", "esc":
 		m.mode = bucketsList
 		m.detailMessage = ""
 		m.prefixes = nil
 		m.bucketUsers = nil
+		m.bucketUsersError = ""
 		m.loading = true
 		return m, m.init()
 	}
@@ -721,19 +760,41 @@ func (m bucketsModel) updateBucketDetailPickPerm(msg tea.KeyMsg) (bucketsModel, 
 
 	return m, func() tea.Msg {
 		ctx := context.Background()
-		// Get user's current access, append new bucket
+		// Get user's current access and upsert this bucket entry.
 		access, err := m.client.GetUserBucketAccess(ctx, username)
 		if err != nil {
 			return errMsg{err: err}
 		}
-		access = append(access, model.BucketAccess{Bucket: bucket.name, Permission: perm})
+		found := false
+		for i, a := range access {
+			if a.Bucket == bucket.name {
+				access[i].Permission = perm
+				found = true
+				break
+			}
+		}
+		if !found {
+			access = append(access, model.BucketAccess{Bucket: bucket.name, Permission: perm})
+		}
 		err = m.client.SetUserBucketAccess(ctx, username, access)
 		if err != nil {
 			return errMsg{err: err}
 		}
-		// Reload bucket users
-		users, _ := m.client.ListBucketUsers(ctx, bucket.name)
+		users := make([]model.UserPermission, 0, len(m.bucketUsers)+1)
+		replaced := false
+		for _, item := range m.bucketUsers {
+			if item.username == username {
+				users = append(users, model.UserPermission{Username: username, Permission: perm})
+				replaced = true
+				continue
+			}
+			users = append(users, model.UserPermission{Username: item.username, Permission: item.permission})
+		}
+		if !replaced {
+			users = append(users, model.UserPermission{Username: username, Permission: perm})
+		}
 		return bucketAccessUpdatedMsg{
+			bucket:  bucket.name,
 			message: fmt.Sprintf("Added %s with %s access", username, perm),
 			users:   users,
 		}
@@ -768,9 +829,15 @@ func (m bucketsModel) updateBucketDetailConfirmRemoveUser(msg tea.KeyMsg) (bucke
 				if err != nil {
 					return errMsg{err: err}
 				}
-				// Reload bucket users
-				users, _ := m.client.ListBucketUsers(ctx, bucket.name)
+				users := make([]model.UserPermission, 0, len(m.bucketUsers)-1)
+				for _, item := range m.bucketUsers {
+					if item.username == username {
+						continue
+					}
+					users = append(users, model.UserPermission{Username: item.username, Permission: item.permission})
+				}
 				return bucketAccessUpdatedMsg{
+					bucket:  bucket.name,
 					message: fmt.Sprintf("Removed %s access to %s", username, bucket.name),
 					users:   users,
 				}
@@ -942,7 +1009,7 @@ func (m bucketsModel) loadBucketUsers() tea.Cmd {
 		ctx := context.Background()
 		users, err := m.client.ListBucketUsers(ctx, bucket.name)
 		if err != nil {
-			return bucketUsersLoadedMsg{bucket: bucket.name, users: nil}
+			return bucketUsersLoadedMsg{bucket: bucket.name, err: err}
 		}
 		return bucketUsersLoadedMsg{bucket: bucket.name, users: users}
 	}
@@ -1139,10 +1206,14 @@ func (m bucketsModel) viewDetail() string {
 	}
 
 	// USER ACCESS section
-	if !m.bucketUsersLoading {
+	if m.bucketUsersLoading {
+		s += "\n  " + dimStyle.Render("Loading user access...") + "\n"
+	} else {
 		s += "\n"
 		s += fmt.Sprintf("  %s\n", tableHeaderStyle.Render(fmt.Sprintf("  %-30s %s", fmt.Sprintf("USER ACCESS (%d)", len(m.bucketUsers)), "PERMISSION")))
-		if len(m.bucketUsers) == 0 {
+		if m.bucketUsersError != "" {
+			s += "  " + errorStyle.Render(m.bucketUsersError) + "\n"
+		} else if len(m.bucketUsers) == 0 {
 			s += "  " + dimStyle.Render("No users assigned.") + "\n"
 		} else {
 			for i, u := range m.bucketUsers {

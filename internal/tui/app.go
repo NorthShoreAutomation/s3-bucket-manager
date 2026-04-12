@@ -48,6 +48,7 @@ func (a App) Init() tea.Cmd {
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var hadErr bool
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
@@ -82,7 +83,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		a.err = msg.err
-		return a, nil
+		hadErr = true
 	}
 
 	// Route to active screen
@@ -94,6 +95,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a, cmd = a.updateUsers(msg)
 	}
 
+	if hadErr {
+		return a, cmd
+	}
 	return a, cmd
 }
 
@@ -248,25 +252,34 @@ type userAccessLoadedMsg struct {
 	access   []model.BucketAccess
 }
 
-type bucketPickerLoadedMsg struct {
+type createBucketPickerLoadedMsg struct {
 	items []bucketItem
 }
 
+type detailBucketPickerLoadedMsg struct {
+	username string
+	items    []bucketItem
+}
+
 type accessUpdatedMsg struct {
-	access  []model.BucketAccess
-	message string
+	username string
+	access   []model.BucketAccess
+	message  string
 }
 
 type bucketUsersLoadedMsg struct {
 	bucket string
 	users  []model.UserPermission
+	err    error
 }
 
 type userPickerLoadedMsg struct {
-	items []userItem
+	bucket string
+	items  []userItem
 }
 
 type bucketAccessUpdatedMsg struct {
+	bucket  string
 	message string
 	users   []model.UserPermission
 }

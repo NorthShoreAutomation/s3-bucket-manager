@@ -37,16 +37,16 @@ const (
 )
 
 type usersModel struct {
-	client       *awsClient.Client
-	items        []userItem
-	cursor       int
-	loading      bool
-	width        int
-	height       int
-	mode         usersMode
+	client    *awsClient.Client
+	items     []userItem
+	cursor    int
+	loading   bool
+	width     int
+	height    int
+	mode      usersMode
 	nameInput textinput.Model
 	message   string
-	creds        credentialsModel
+	creds     credentialsModel
 
 	// Detail view
 	detailUser    string               // username being viewed
@@ -59,6 +59,15 @@ type usersModel struct {
 	availableBuckets []bucketItem // buckets not already assigned
 	pickerCursor     int          // cursor in picker list
 	pendingBucket    string       // selected bucket, awaiting permission choice
+}
+
+func (m *usersModel) resetDetailState() {
+	m.detailUser = ""
+	m.detailAccess = nil
+	m.detailCursor = 0
+	m.detailLoading = false
+	m.detailMessage = ""
+	m.pendingBucket = ""
 }
 
 func newUsersModel(client *awsClient.Client) usersModel {
@@ -124,6 +133,9 @@ func (m usersModel) update(msg tea.Msg) (usersModel, tea.Cmd) {
 		return m, m.init()
 
 	case userAccessLoadedMsg:
+		if msg.username != m.detailUser || m.mode == usersList || m.mode == usersCreate || m.mode == usersCreateBuckets || m.mode == usersCreatePerm || m.mode == usersConfirmDelete || m.mode == usersShowCreds {
+			return m, nil
+		}
 		m.detailAccess = msg.access
 		m.detailLoading = false
 		if m.detailCursor >= len(m.detailAccess) {
@@ -131,7 +143,19 @@ func (m usersModel) update(msg tea.Msg) (usersModel, tea.Cmd) {
 		}
 		return m, nil
 
-	case bucketPickerLoadedMsg:
+	case createBucketPickerLoadedMsg:
+		if m.mode != usersCreateBuckets {
+			return m, nil
+		}
+		m.availableBuckets = append([]bucketItem(nil), msg.items...)
+		m.loading = false
+		m.pickerCursor = 0
+		return m, nil
+
+	case detailBucketPickerLoadedMsg:
+		if msg.username != m.detailUser || m.mode != usersDetailPickBucket {
+			return m, nil
+		}
 		// Filter out buckets already assigned to this user
 		assigned := make(map[string]bool, len(m.detailAccess))
 		for _, a := range m.detailAccess {
@@ -149,6 +173,9 @@ func (m usersModel) update(msg tea.Msg) (usersModel, tea.Cmd) {
 		return m, nil
 
 	case accessUpdatedMsg:
+		if msg.username != m.detailUser || m.mode == usersList || m.mode == usersCreate || m.mode == usersCreateBuckets || m.mode == usersCreatePerm || m.mode == usersConfirmDelete || m.mode == usersShowCreds {
+			return m, nil
+		}
 		m.detailAccess = msg.access
 		m.detailMessage = msg.message
 		m.detailLoading = false
@@ -195,6 +222,7 @@ func (m usersModel) updateList(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 			m.cursor++
 		}
 	case "c":
+		m.resetDetailState()
 		m.mode = usersCreate
 		m.nameInput.SetValue("")
 		m.nameInput.Focus()
@@ -221,6 +249,7 @@ func (m usersModel) updateList(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 		}
 	case "r":
 		if len(m.items) > 0 {
+			m.resetDetailState()
 			username := m.items[m.cursor].name
 			m.loading = true
 			return m, func() tea.Msg {
@@ -264,7 +293,7 @@ func (m usersModel) updateCreateName(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 					region: b.Region,
 				}
 			}
-			return bucketPickerLoadedMsg{items: items}
+			return createBucketPickerLoadedMsg{items: items}
 		}
 	case "esc":
 		m.mode = usersList
@@ -374,6 +403,7 @@ func (m usersModel) updateShowCreds(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 		return m, nil
 	case "esc", "enter":
 		m.mode = usersList
+		m.resetDetailState()
 		return m, m.init()
 	}
 	return m, nil
@@ -541,8 +571,9 @@ func (m usersModel) updateDetail(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 					return errMsg{err: err}
 				}
 				return accessUpdatedMsg{
-					access:  accessCopy,
-					message: fmt.Sprintf("Updated %s to %s", changedBucket, changedPerm),
+					username: username,
+					access:   accessCopy,
+					message:  fmt.Sprintf("Updated %s to %s", changedBucket, changedPerm),
 				}
 			}
 		}
@@ -563,7 +594,7 @@ func (m usersModel) updateDetail(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 					region: b.Region,
 				}
 			}
-			return bucketPickerLoadedMsg{items: items}
+			return detailBucketPickerLoadedMsg{username: m.detailUser, items: items}
 		}
 	case "d":
 		if len(m.detailAccess) > 0 && m.detailCursor < len(m.detailAccess) {
@@ -586,11 +617,7 @@ func (m usersModel) updateDetail(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 		}
 	case "esc":
 		m.mode = usersList
-		m.detailUser = ""
-		m.detailAccess = nil
-		m.detailCursor = 0
-		m.detailMessage = ""
-		m.detailLoading = false
+		m.resetDetailState()
 		return m, nil
 	}
 	return m, nil
@@ -656,8 +683,9 @@ func (m usersModel) updateDetailPickPerm(msg tea.KeyMsg) (usersModel, tea.Cmd) {
 			return errMsg{err: err}
 		}
 		return accessUpdatedMsg{
-			access:  accessCopy,
-			message: fmt.Sprintf("Added %s with %s access", bucket, permission),
+			username: username,
+			access:   accessCopy,
+			message:  fmt.Sprintf("Added %s with %s access", bucket, permission),
 		}
 	}
 }
@@ -686,8 +714,9 @@ func (m usersModel) updateDetailConfirmRemove(msg tea.KeyMsg) (usersModel, tea.C
 					return errMsg{err: err}
 				}
 				return accessUpdatedMsg{
-					access:  accessCopy,
-					message: fmt.Sprintf("Removed access to %s", removedBucket),
+					username: username,
+					access:   accessCopy,
+					message:  fmt.Sprintf("Removed access to %s", removedBucket),
 				}
 			}
 		}
