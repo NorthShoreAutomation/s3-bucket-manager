@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -403,6 +404,24 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			if m.cursor >= m.offset+visible {
 				m.offset = m.cursor - visible + 1
 			}
+		}
+	case "pgup":
+		visible := m.visibleRows()
+		m.cursor -= visible
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		if m.cursor < m.offset {
+			m.offset = m.cursor
+		}
+	case "pgdown":
+		visible := m.visibleRows()
+		m.cursor += visible
+		if m.cursor >= len(m.items) {
+			m.cursor = len(m.items) - 1
+		}
+		if m.cursor >= m.offset+visible {
+			m.offset = m.cursor - visible + 1
 		}
 	case "c":
 		m.mode = bucketsCreate
@@ -1335,7 +1354,7 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [p] Upload  [g] Download  [d] Delete  [r] Refresh  [esc] Prefix list")
+		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [g] Download  [p] Upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
 	} else {
 		// Prefix list
 		if len(m.prefixes) > 0 {
@@ -1531,6 +1550,24 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				m.browseOffset = m.browseCursor - visible + 1
 			}
 		}
+	case "pgup":
+		visible := m.browseVisibleRows()
+		m.browseCursor -= visible
+		if m.browseCursor < 0 {
+			m.browseCursor = 0
+		}
+		if m.browseCursor < m.browseOffset {
+			m.browseOffset = m.browseCursor
+		}
+	case "pgdown":
+		visible := m.browseVisibleRows()
+		m.browseCursor += visible
+		if m.browseCursor >= len(m.browseItems) {
+			m.browseCursor = len(m.browseItems) - 1
+		}
+		if m.browseCursor >= m.browseOffset+visible {
+			m.browseOffset = m.browseCursor - visible + 1
+		}
 	case "right", "l":
 		// Drill into folder
 		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
@@ -1560,6 +1597,17 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		// Enter toggles access on the current item if it's a folder
 		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
 			return m.toggleBrowseFolder()
+		}
+	case "c":
+		if m.browseCursor < len(m.browseItems) {
+			bucket := m.items[m.cursor]
+			item := m.browseItems[m.browseCursor]
+			url := publicURL(bucket.name, item.Key)
+			if err := clipboard.WriteAll(url); err != nil {
+				m.detailMessage = "Clipboard unavailable: " + err.Error()
+			} else {
+				m.detailMessage = "Copied to clipboard"
+			}
 		}
 	case "d":
 		if m.browseCursor < len(m.browseItems) {

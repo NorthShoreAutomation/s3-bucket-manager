@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Renamed "add prefix" keybinding from `[p]` to `[c]` in prefix list view for consistency with bucket list's `[c] Create`
 
+## [0.4.0] - 2026-04-12
+### Added
+- add [c] keybinding to copy public URL to clipboard (#5)
+### Added
+- Press `c` in file browser to copy the public URL of the selected file or folder to the clipboard
+
+## [0.3.0] - 2026-04-12
+### Added
+- add page up/down navigation to bucket list and file browser (#6)
+
+### Added
+- Page Up / Page Down keyboard navigation in bucket list and file browser views
+
 ## [0.2.0] - 2026-04-12
 ### Added
 - add permission-level access management (#4)
