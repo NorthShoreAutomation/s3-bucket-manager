@@ -123,6 +123,7 @@ func (a App) viewHelp() string {
 	s += "  c       Create new item\n"
 	s += "  d       Delete selected item\n"
 	s += "  g       Download selected file\n"
+	s += "  p       Upload file to current folder\n"
 	s += "  enter   Select / drill in\n"
 	s += "  esc     Go back\n"
 	s += "  ?       Toggle this help\n"
@@ -238,6 +239,10 @@ type folderDeleteProgressMsg struct {
 type downloadDoneMsg struct {
 	filename string
 	path     string
+}
+
+type uploadDoneMsg struct {
+	filename string
 }
 
 // prog holds the running tea.Program so goroutines can send progress messages.

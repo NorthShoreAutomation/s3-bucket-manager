@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Upload file to S3 via `[p]` key in file browser — opens a local file picker that mirrors the S3 browser's look and feel, allowing filesystem navigation and file selection for upload to the current S3 prefix
 
 ## [0.1.0] - 2026-04-10
 ### Added
