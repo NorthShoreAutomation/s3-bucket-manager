@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Page Up / Page Down keyboard navigation in bucket list and file browser views
 
+## [0.2.0] - 2026-04-12
+### Added
+- add permission-level access management (#4)
+
+### Added
+- Per-bucket permission levels: `read`, `read-write`, `read-write-delete` for managed IAM users
+- Multi-part upload actions (AbortMultipartUpload, ListMultipartUploadParts, ListBucketMultipartUploads) included in write permission levels
+- TUI user detail view: press Enter on a user to see their bucket access with permission levels
+- TUI bucket detail view: USER ACCESS section showing assigned users and their permissions inline
+- Add, remove, and cycle permissions from both user detail and bucket detail views
+- Bucket picker and user picker for granting access (filters out already-assigned items)
+- Permission selector (1/2/3) during user creation and when adding access
+- Context-sensitive help bar in bucket detail view (adapts to cursor section)
+- `--permission` flag on `s3m user create` CLI command (default: `read-write-delete`)
+- Backward compatibility: existing users with legacy policies detected as `read-write-delete`
+
+### Changed
+- IAM policies now generate one statement per bucket with permission-scoped actions (was single statement for all buckets)
+- User creation flow includes permission level selection step
+- `CreateManagedUser` accepts per-bucket permission levels instead of plain bucket names
+
 ## [0.1.0] - 2026-04-10
 ### Added
 - s3m - Go TUI for S3 bucket, user, and access management (#1)

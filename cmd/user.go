@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
+	"github.com/dcorbell/s3m/internal/model"
 )
 
 var userCmd = &cobra.Command{
@@ -55,8 +56,9 @@ var userListCmd = &cobra.Command{
 }
 
 var (
-	userBuckets   string
-	deleteUserYes bool
+	userBuckets    string
+	userPermission string
+	deleteUserYes  bool
 )
 
 var userCreateCmd = &cobra.Command{
@@ -68,7 +70,24 @@ var userCreateCmd = &cobra.Command{
 		if userBuckets == "" {
 			return fmt.Errorf("Specify which buckets this user can access with --buckets <bucket1,bucket2>")
 		}
+
+		// Validate permission level
+		perm := model.PermissionLevel(userPermission)
+		switch perm {
+		case model.PermRead, model.PermReadWrite, model.PermReadWriteDelete:
+			// valid
+		default:
+			return fmt.Errorf("Invalid permission level %q. Must be one of: read, read-write, read-write-delete", userPermission)
+		}
+
 		buckets := strings.Split(userBuckets, ",")
+		accesses := make([]model.BucketAccess, 0, len(buckets))
+		for _, b := range buckets {
+			accesses = append(accesses, model.BucketAccess{
+				Bucket:     b,
+				Permission: perm,
+			})
+		}
 
 		ctx := context.Background()
 		client, err := awsClient.NewClient(ctx, profile, region)
@@ -76,7 +95,7 @@ var userCreateCmd = &cobra.Command{
 			return fmt.Errorf("Could not connect to AWS. Check your credentials.\n  Detail: %w", err)
 		}
 
-		key, err := client.CreateManagedUser(ctx, username, buckets)
+		key, err := client.CreateManagedUser(ctx, username, accesses)
 		if err != nil {
 			return err
 		}
@@ -93,6 +112,7 @@ var userCreateCmd = &cobra.Command{
 		fmt.Printf("  Access Key ID:  %s\n", key.AccessKeyID)
 		fmt.Printf("  Secret Key:     %s\n", key.SecretAccessKey)
 		fmt.Printf("  Buckets:        %s\n", strings.Join(buckets, ", "))
+		fmt.Printf("  Permission:     %s\n", perm)
 		fmt.Println()
 		fmt.Println("  WARNING: This is the only time the secret key will be shown.")
 		fmt.Println()
@@ -202,6 +222,7 @@ var userRotateKeyCmd = &cobra.Command{
 func init() {
 	userCreateCmd.Flags().StringVar(&userBuckets, "buckets", "", "Comma-separated list of bucket names to grant access to (required)")
 	userCreateCmd.MarkFlagRequired("buckets")
+	userCreateCmd.Flags().StringVar(&userPermission, "permission", "read-write-delete", "Permission level: read, read-write, or read-write-delete")
 	userDeleteCmd.Flags().BoolVar(&deleteUserYes, "yes", false, "Skip confirmation prompt")
 
 	userCmd.AddCommand(userListCmd)
