@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -211,6 +214,12 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 
 	case folderDeleteProgressMsg:
 		m.deleteProgress = fmt.Sprintf("Deleting folder... %s objects removed", formatWithCommas(msg.deleted))
+		return m, nil
+
+	case downloadDoneMsg:
+		m.loading = false
+		m.detailMessage = fmt.Sprintf("Downloaded %s to %s", msg.filename, msg.path)
+		m.deleteProgress = ""
 		return m, nil
 
 	case spinner.TickMsg:
@@ -1054,6 +1063,36 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			m.confirmInput2.SetValue("")
 			m.confirmInput2.Focus()
 			return m, textinput.Blink
+		}
+	case "g":
+		// Download selected file to current working directory
+		if m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
+			item := m.browseItems[m.browseCursor]
+			bucket := m.items[m.cursor]
+			m.loading = true
+			m.deleteProgress = fmt.Sprintf("Downloading %s...", item.Name)
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				ctx := context.Background()
+				cwd, err := os.Getwd()
+				if err != nil {
+					return errMsg{err: fmt.Errorf("could not get working directory: %w", err)}
+				}
+				body, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
+				if err != nil {
+					return errMsg{err: fmt.Errorf("could not download %s: %w", item.Name, err)}
+				}
+				defer body.Close()
+				outPath := filepath.Join(cwd, item.Name)
+				f, err := os.Create(outPath)
+				if err != nil {
+					return errMsg{err: fmt.Errorf("could not create file %s: %w", outPath, err)}
+				}
+				defer f.Close()
+				if _, err := io.Copy(f, body); err != nil {
+					return errMsg{err: fmt.Errorf("could not write file %s: %w", outPath, err)}
+				}
+				return downloadDoneMsg{filename: item.Name, path: outPath}
+			})
 		}
 	case "r":
 		m.loading = true
