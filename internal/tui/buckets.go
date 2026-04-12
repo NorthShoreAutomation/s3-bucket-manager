@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -1327,7 +1328,7 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [d] Delete  [r] Refresh  [esc] Prefix list")
+		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
 	} else {
 		// Prefix list
 		if len(m.prefixes) > 0 {
@@ -1534,6 +1535,17 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		// Enter toggles access on the current item if it's a folder
 		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
 			return m.toggleBrowseFolder()
+		}
+	case "c":
+		if m.browseCursor < len(m.browseItems) {
+			bucket := m.items[m.cursor]
+			item := m.browseItems[m.browseCursor]
+			url := publicURL(bucket.name, item.Key)
+			if err := clipboard.WriteAll(url); err != nil {
+				m.detailMessage = "Clipboard unavailable: " + err.Error()
+			} else {
+				m.detailMessage = "Copied to clipboard"
+			}
 		}
 	case "d":
 		if m.browseCursor < len(m.browseItems) {

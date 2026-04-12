@@ -125,7 +125,7 @@ func (a App) viewHelp() string {
 	s := titleStyle.Render("s3m - Keyboard Shortcuts") + "\n\n"
 	s += "  b       Open buckets\n"
 	s += "  u       Open users\n"
-	s += "  c       Create new item\n"
+	s += "  c       Create new item / copy URL\n"
 	s += "  d       Delete selected item\n"
 	s += "  enter   Select / drill in\n"
 	s += "  pgup    Page up in lists\n"
