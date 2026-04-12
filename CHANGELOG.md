@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Page Up / Page Down keyboard navigation in bucket list and file browser views
+
 ## [0.2.0] - 2026-04-12
 ### Added
 - add permission-level access management (#4)

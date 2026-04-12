@@ -128,6 +128,8 @@ func (a App) viewHelp() string {
 	s += "  c       Create new item\n"
 	s += "  d       Delete selected item\n"
 	s += "  enter   Select / drill in\n"
+	s += "  pgup    Page up in lists\n"
+	s += "  pgdn    Page down in lists\n"
 	s += "  esc     Go back\n"
 	s += "  ?       Toggle this help\n"
 	s += "  q       Quit\n"
