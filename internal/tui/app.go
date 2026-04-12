@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
+	"github.com/dcorbell/s3m/internal/model"
 )
 
 type screen int
@@ -47,6 +48,7 @@ func (a App) Init() tea.Cmd {
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var hadErr bool
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
@@ -81,7 +83,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		a.err = msg.err
-		return a, nil
+		hadErr = true
 	}
 
 	// Route to active screen
@@ -93,6 +95,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a, cmd = a.updateUsers(msg)
 	}
 
+	if hadErr {
+		return a, cmd
+	}
 	return a, cmd
 }
 
@@ -140,8 +145,10 @@ func (a App) isTextInputActive() bool {
 		a.buckets.mode == bucketDetailAddPrefix ||
 		a.buckets.mode == bucketDetailConfirm ||
 		a.buckets.mode == bucketDetailDeleteFolder ||
-		a.users.mode == usersCreate ||
-		a.users.mode == usersCreateBuckets
+		a.buckets.mode == bucketDetailPickUser ||
+		a.buckets.mode == bucketDetailPickPerm ||
+		a.buckets.mode == bucketDetailConfirmRemoveUser ||
+		a.users.mode == usersCreate
 }
 
 // Routing helpers
@@ -191,6 +198,12 @@ type errMsg struct{ err error }
 
 type bucketsLoadedMsg struct {
 	buckets []bucketItem
+}
+
+type bucketStatsMsg struct {
+	name      string
+	objects   int64
+	sizeBytes int64
 }
 
 type bucketNotEmptyMsg struct {
@@ -243,6 +256,43 @@ type downloadDoneMsg struct {
 
 type uploadDoneMsg struct {
 	filename string
+}
+
+type userAccessLoadedMsg struct {
+	username string
+	access   []model.BucketAccess
+}
+
+type createBucketPickerLoadedMsg struct {
+	items []bucketItem
+}
+
+type detailBucketPickerLoadedMsg struct {
+	username string
+	items    []bucketItem
+}
+
+type accessUpdatedMsg struct {
+	username string
+	access   []model.BucketAccess
+	message  string
+}
+
+type bucketUsersLoadedMsg struct {
+	bucket string
+	users  []model.UserPermission
+	err    error
+}
+
+type userPickerLoadedMsg struct {
+	bucket string
+	items  []userItem
+}
+
+type bucketAccessUpdatedMsg struct {
+	bucket  string
+	message string
+	users   []model.UserPermission
 }
 
 // prog holds the running tea.Program so goroutines can send progress messages.
