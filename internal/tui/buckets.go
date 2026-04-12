@@ -444,7 +444,7 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		}
 	case "enter":
 		return m.toggleSelected()
-	case "p":
+	case "c":
 		m.mode = bucketDetailAddPrefix
 		m.prefixInput.SetValue("")
 		m.prefixInput.Focus()
@@ -934,7 +934,7 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [p] Add prefix  [d] Delete prefix  [r] Refresh  [←] Back")
+		s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [c] Add prefix  [d] Delete prefix  [r] Refresh  [←] Back")
 	}
 	return s
 }
