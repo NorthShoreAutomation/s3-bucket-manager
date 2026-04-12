@@ -82,6 +82,10 @@ func (m *mockS3) DeleteBucketPolicy(ctx context.Context, params *s3.DeleteBucket
 	return nil, m.deleteBucketPolicyErr
 }
 
+func (m *mockS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return &s3.GetObjectOutput{}, nil
+}
+
 func TestListBuckets(t *testing.T) {
 	now := time.Now()
 	mock := &mockS3{
