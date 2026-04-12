@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -12,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
+	"github.com/dcorbell/s3m/internal/model"
 )
 
 type bucketItem struct {
@@ -31,16 +31,24 @@ type prefixItem struct {
 type bucketsMode int
 
 const (
-	bucketsList                  bucketsMode = iota
-	bucketsCreate                            // typing a new bucket name
-	bucketsTypeDelete                        // type 'delete' to start deletion
-	bucketsConfirmDelete                     // are you sure? [y/N]
-	bucketsConfirmDeleteNonEmpty             // type bucket name to confirm emptying
-	bucketDetail                             // viewing a single bucket's details
-	bucketDetailAddPrefix                    // typing a new prefix name
-	bucketDetailConfirm                      // type 'yes' to confirm access change
-	bucketDetailDeleteFolder                 // type 'delete' to confirm folder deletion
+	bucketsList                   bucketsMode = iota
+	bucketsCreate                             // typing a new bucket name
+	bucketsTypeDelete                         // type 'delete' to start deletion
+	bucketsConfirmDelete                      // are you sure? [y/N]
+	bucketsConfirmDeleteNonEmpty              // type bucket name to confirm emptying
+	bucketDetail                              // viewing a single bucket's details
+	bucketDetailAddPrefix                     // typing a new prefix name
+	bucketDetailConfirm                       // type 'yes' to confirm access change
+	bucketDetailDeleteFolder                  // type 'delete' to confirm folder deletion
+	bucketDetailPickUser                      // selecting a user to add
+	bucketDetailPickPerm                      // choosing permission level for new user
+	bucketDetailConfirmRemoveUser             // confirm removing user access
 )
+
+type bucketUserItem struct {
+	username   string
+	permission model.PermissionLevel
+}
 
 type bucketsModel struct {
 	client         *awsClient.Client
@@ -59,13 +67,21 @@ type bucketsModel struct {
 	deleteProgress string // shown during bucket emptying
 
 	// Detail view fields
-	detailCursor  int             // cursor position in detail view (0 = bucket row, 1+ = prefixes)
+	detailCursor  int             // cursor position in detail view (0 = bucket row, 1+ = users, then prefixes)
 	prefixes      []prefixItem    // prefixes for currently selected bucket
 	prefixInput   textinput.Model // for adding new prefixes
 	confirmInput2 textinput.Model // for typing 'yes' to confirm access change
 	confirmAction string          // description of what will happen
 	confirmFunc   func() tea.Msg  // the action to execute on confirmation
 	detailMessage string          // status message in detail view
+
+	// Bucket user access
+	bucketUsers        []bucketUserItem // users with access to current bucket
+	bucketUsersLoading bool             // loading users separately
+	bucketUsersError   string
+	availableUsers     []userItem // for the user picker (managed users not yet assigned)
+	userPickerCursor   int
+	pendingUser        string // user selected in picker, awaiting permission
 
 	// File browser fields
 	browsePrefix       string                 // current prefix being browsed (empty = root)
@@ -117,7 +133,6 @@ func (m bucketsModel) init() tea.Cmd {
 			return errMsg{err: err}
 		}
 		items := make([]bucketItem, len(buckets))
-		var wg sync.WaitGroup
 		for i, b := range buckets {
 			items[i] = bucketItem{
 				name:     b.Name,
@@ -125,21 +140,53 @@ func (m bucketsModel) init() tea.Cmd {
 				isPublic: b.IsPublic,
 				created:  b.CreationDate.Format("2006-01-02"),
 			}
-			wg.Add(1)
-			go func(idx int, name, region string) {
-				defer wg.Done()
-				stats, _ := m.client.GetBucketStats(ctx, name, region)
-				items[idx].objects = stats.ObjectCount
-				items[idx].sizeBytes = stats.SizeBytes
-			}(i, b.Name, b.Region)
 		}
-		wg.Wait()
 		return bucketsLoadedMsg{buckets: items}
 	})
 }
 
+// loadBucketStatsCmd returns a command that fetches CloudWatch stats for all
+// buckets concurrently. Each bucket's stats arrive as a separate bucketStatsMsg
+// so the UI updates progressively.
+func (m bucketsModel) loadBucketStatsCmd() tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(m.items))
+	for _, b := range m.items {
+		name, region := b.name, b.region
+		cmds = append(cmds, func() tea.Msg {
+			ctx := context.Background()
+			stats, _ := m.client.GetBucketStats(ctx, name, region)
+			return bucketStatsMsg{
+				name:      name,
+				objects:   stats.ObjectCount,
+				sizeBytes: stats.SizeBytes,
+			}
+		})
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m bucketsModel) currentBucketName() string {
+	if m.cursor < 0 || m.cursor >= len(m.items) {
+		return ""
+	}
+	return m.items[m.cursor].name
+}
+
+func userPermsToItems(users []model.UserPermission) []bucketUserItem {
+	items := make([]bucketUserItem, len(users))
+	for i, u := range users {
+		items[i] = bucketUserItem{username: u.Username, permission: u.Permission}
+	}
+	return items
+}
+
 func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case errMsg:
+		m.loading = false
+		m.bucketUsersLoading = false
+		return m, nil
+
 	case bucketsLoadedMsg:
 		m.items = msg.buckets
 		m.loading = false
@@ -147,6 +194,17 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.deleteProgress = ""
 		if m.cursor >= len(m.items) {
 			m.cursor = max(0, len(m.items)-1)
+		}
+		// Kick off background stats fetch (CloudWatch) — list renders immediately
+		return m, m.loadBucketStatsCmd()
+
+	case bucketStatsMsg:
+		for i := range m.items {
+			if m.items[i].name == msg.name {
+				m.items[i].objects = msg.objects
+				m.items[i].sizeBytes = msg.sizeBytes
+				break
+			}
 		}
 		return m, nil
 
@@ -159,11 +217,11 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			m.loading = true
 			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 		}
-		// If we're in detail view, reload prefixes
+		// If we're in detail view, reload prefixes and bucket users
 		if m.mode == bucketDetail || m.mode == bucketDetailConfirm {
 			m.mode = bucketDetail
 			if m.cursor < len(m.items) {
-				return m, m.loadPrefixes()
+				return m, tea.Batch(m.loadPrefixes(), m.loadBucketUsers())
 			}
 		}
 		m.mode = bucketsList
@@ -209,6 +267,53 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.deleteInput.Focus()
 		return m, textinput.Blink
 
+	case bucketUsersLoadedMsg:
+		if msg.bucket != m.currentBucketName() {
+			return m, nil
+		}
+		m.bucketUsersError = ""
+		if msg.err != nil {
+			m.bucketUsersError = msg.err.Error()
+			m.bucketUsers = nil
+			m.bucketUsersLoading = false
+			return m, nil
+		}
+		m.bucketUsers = userPermsToItems(msg.users)
+		m.bucketUsersLoading = false
+		return m, nil
+
+	case userPickerLoadedMsg:
+		if msg.bucket != m.currentBucketName() || m.mode != bucketDetailPickUser {
+			return m, nil
+		}
+		// Filter out users already assigned to this bucket
+		assigned := make(map[string]bool, len(m.bucketUsers))
+		for _, u := range m.bucketUsers {
+			assigned[u.username] = true
+		}
+		m.availableUsers = nil
+		for _, u := range msg.items {
+			if !assigned[u.name] {
+				m.availableUsers = append(m.availableUsers, u)
+			}
+		}
+		m.loading = false
+		m.userPickerCursor = 0
+		return m, nil
+
+	case bucketAccessUpdatedMsg:
+		if msg.bucket != m.currentBucketName() {
+			return m, nil
+		}
+		m.bucketUsers = userPermsToItems(msg.users)
+		m.bucketUsersError = ""
+		m.detailMessage = msg.message
+		m.loading = false
+		if m.detailCursor > len(m.bucketUsers) {
+			m.detailCursor = max(0, len(m.bucketUsers))
+		}
+		return m, nil
+
 	case folderDeleteProgressMsg:
 		m.deleteProgress = fmt.Sprintf("Deleting folder... %s objects removed", formatWithCommas(msg.deleted))
 		return m, nil
@@ -240,6 +345,12 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			return m.updateDetailConfirm(msg)
 		case bucketDetailDeleteFolder:
 			return m.updateDeleteFolder(msg)
+		case bucketDetailPickUser:
+			return m.updateBucketDetailPickUser(msg)
+		case bucketDetailPickPerm:
+			return m.updateBucketDetailPickPerm(msg)
+		case bucketDetailConfirmRemoveUser:
+			return m.updateBucketDetailConfirmRemoveUser(msg)
 		}
 	}
 	return m, nil
@@ -294,7 +405,10 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			m.detailCursor = 0
 			m.detailMessage = ""
 			m.loading = true
-			return m, tea.Batch(m.spinner.Tick, m.loadPrefixes())
+			m.bucketUsers = nil
+			m.bucketUsersLoading = true
+			m.bucketUsersError = ""
+			return m, tea.Batch(m.spinner.Tick, m.loadPrefixes(), m.loadBucketUsers())
 		}
 	}
 	return m, nil
@@ -416,13 +530,34 @@ func (m bucketsModel) updateConfirmDeleteNonEmpty(msg tea.KeyMsg) (bucketsModel,
 
 // --- Detail view updates ---
 
+// cursorSection returns which section the detail cursor is currently in.
+func (m bucketsModel) cursorSection() string {
+	if m.detailCursor == 0 {
+		return "bucket"
+	}
+	if m.detailCursor <= len(m.bucketUsers) {
+		return "users"
+	}
+	return "prefixes"
+}
+
+// userIndex returns the index into bucketUsers for the current cursor position.
+func (m bucketsModel) userIndex() int {
+	return m.detailCursor - 1
+}
+
+// prefixIndex returns the index into prefixes for the current cursor position.
+func (m bucketsModel) prefixIndex() int {
+	return m.detailCursor - 1 - len(m.bucketUsers)
+}
+
 func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	// When browsing inside a prefix, delegate to browse handler
 	if m.browsePrefix != "" || len(m.browseItems) > 0 {
 		return m.updateBrowse(msg)
 	}
 
-	maxRow := len(m.prefixes) // row 0 = bucket toggle, rows 1..N = prefixes
+	maxRow := len(m.bucketUsers) + len(m.prefixes) // row 0 = bucket toggle
 	switch msg.String() {
 	case "up", "k":
 		if m.detailCursor > 0 {
@@ -433,49 +568,284 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			m.detailCursor++
 		}
 	case "right", "l":
-		// Drill into selected prefix
-		if m.detailCursor > 0 && m.detailCursor <= len(m.prefixes) {
-			idx := m.detailCursor - 1
-			m.browsePrefix = m.prefixes[idx].prefix
-			m.browseCursor = 0
-			m.browseOffset = 0
-			m.loading = true
-			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+		// Drill into selected prefix (only for prefix rows)
+		section := m.cursorSection()
+		if section == "prefixes" {
+			idx := m.prefixIndex()
+			if idx >= 0 && idx < len(m.prefixes) {
+				m.browsePrefix = m.prefixes[idx].prefix
+				m.browseCursor = 0
+				m.browseOffset = 0
+				m.loading = true
+				return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+			}
 		}
 	case "enter":
-		return m.toggleSelected()
+		section := m.cursorSection()
+		switch section {
+		case "bucket":
+			return m.toggleSelected()
+		case "users":
+			// Cycle permission for the selected user
+			idx := m.userIndex()
+			if idx >= 0 && idx < len(m.bucketUsers) {
+				u := m.bucketUsers[idx]
+				newPerm := nextPermission(u.permission)
+				m.loading = true
+				m.detailMessage = ""
+				bucket := m.items[m.cursor]
+				username := u.username
+				updatedUsers := make([]model.UserPermission, 0, len(m.bucketUsers))
+				for i, item := range m.bucketUsers {
+					perm := item.permission
+					if i == idx {
+						perm = newPerm
+					}
+					updatedUsers = append(updatedUsers, model.UserPermission{
+						Username:   item.username,
+						Permission: perm,
+					})
+				}
+				return m, func() tea.Msg {
+					ctx := context.Background()
+					// Get user's full access, update this bucket's permission
+					access, err := m.client.GetUserBucketAccess(ctx, username)
+					if err != nil {
+						return errMsg{err: err}
+					}
+					found := false
+					for i, a := range access {
+						if a.Bucket == bucket.name {
+							access[i].Permission = newPerm
+							found = true
+							break
+						}
+					}
+					if !found {
+						access = append(access, model.BucketAccess{Bucket: bucket.name, Permission: newPerm})
+					}
+					err = m.client.SetUserBucketAccess(ctx, username, access)
+					if err != nil {
+						return errMsg{err: err}
+					}
+					return bucketAccessUpdatedMsg{
+						bucket:  bucket.name,
+						message: fmt.Sprintf("Updated %s to %s", username, newPerm),
+						users:   updatedUsers,
+					}
+				}
+			}
+		case "prefixes":
+			return m.toggleSelected()
+		}
+	case "a":
+		// Add user — available from bucket toggle or user section
+		section := m.cursorSection()
+		if (section == "bucket" || section == "users") && !m.bucketUsersLoading {
+			m.mode = bucketDetailPickUser
+			m.userPickerCursor = 0
+			m.loading = true
+			return m, func() tea.Msg {
+				ctx := context.Background()
+				users, err := m.client.ListManagedUsers(ctx)
+				if err != nil {
+					return errMsg{err: err}
+				}
+				items := make([]userItem, len(users))
+				for i, u := range users {
+					items[i] = userItem{
+						name:     u.Name,
+						keyCount: u.KeyCount,
+						created:  u.CreateDate.Format("2006-01-02"),
+					}
+				}
+				return userPickerLoadedMsg{bucket: m.currentBucketName(), items: items}
+			}
+		}
+	case "d":
+		section := m.cursorSection()
+		switch section {
+		case "users":
+			// Remove user access
+			idx := m.userIndex()
+			if idx >= 0 && idx < len(m.bucketUsers) {
+				m.mode = bucketDetailConfirmRemoveUser
+			}
+		case "prefixes":
+			// Delete selected prefix
+			idx := m.prefixIndex()
+			if idx >= 0 && idx < len(m.prefixes) {
+				p := m.prefixes[idx]
+				bucket := m.items[m.cursor]
+				m.loading = true
+				m.deleteProgress = "Counting objects..."
+				return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+					ctx := context.Background()
+					count, err := m.client.CountObjects(ctx, bucket.name, p.prefix, bucket.region)
+					if err != nil {
+						return errMsg{err: err}
+					}
+					return folderCountedMsg{name: p.prefix, key: p.prefix, count: count, isPublic: p.isPublic}
+				})
+			}
+		}
 	case "p":
 		m.mode = bucketDetailAddPrefix
 		m.prefixInput.SetValue("")
 		m.prefixInput.Focus()
 		return m, textinput.Blink
-	case "d":
-		// Delete selected prefix (only for prefix rows, not the bucket row)
-		if m.detailCursor > 0 && m.detailCursor <= len(m.prefixes) {
-			idx := m.detailCursor - 1
-			p := m.prefixes[idx]
-			bucket := m.items[m.cursor]
-			m.loading = true
-			m.deleteProgress = "Counting objects..."
-			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				ctx := context.Background()
-				count, err := m.client.CountObjects(ctx, bucket.name, p.prefix, bucket.region)
-				if err != nil {
-					return errMsg{err: err}
-				}
-				return folderCountedMsg{name: p.prefix, key: p.prefix, count: count, isPublic: p.isPublic}
-			})
-		}
 	case "r":
 		m.loading = true
 		m.detailMessage = ""
-		return m, tea.Batch(m.spinner.Tick, m.loadPrefixes())
+		m.bucketUsersLoading = true
+		m.bucketUsersError = ""
+		return m, tea.Batch(m.spinner.Tick, m.loadPrefixes(), m.loadBucketUsers())
 	case "left", "h", "esc":
 		m.mode = bucketsList
 		m.detailMessage = ""
 		m.prefixes = nil
+		m.bucketUsers = nil
+		m.bucketUsersError = ""
 		m.loading = true
 		return m, m.init()
+	}
+	return m, nil
+}
+
+func (m bucketsModel) updateBucketDetailPickUser(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.userPickerCursor > 0 {
+			m.userPickerCursor--
+		}
+	case "down", "j":
+		if m.userPickerCursor < len(m.availableUsers)-1 {
+			m.userPickerCursor++
+		}
+	case "enter":
+		if len(m.availableUsers) > 0 && m.userPickerCursor < len(m.availableUsers) {
+			m.pendingUser = m.availableUsers[m.userPickerCursor].name
+			m.mode = bucketDetailPickPerm
+		}
+	case "esc":
+		m.mode = bucketDetail
+		m.availableUsers = nil
+		m.userPickerCursor = 0
+	}
+	return m, nil
+}
+
+func (m bucketsModel) updateBucketDetailPickPerm(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	var perm model.PermissionLevel
+	switch msg.String() {
+	case "1":
+		perm = model.PermRead
+	case "2":
+		perm = model.PermReadWrite
+	case "3":
+		perm = model.PermReadWriteDelete
+	case "esc":
+		m.mode = bucketDetail
+		m.pendingUser = ""
+		return m, nil
+	default:
+		return m, nil
+	}
+
+	bucket := m.items[m.cursor]
+	username := m.pendingUser
+	m.loading = true
+	m.mode = bucketDetail
+	m.pendingUser = ""
+
+	return m, func() tea.Msg {
+		ctx := context.Background()
+		// Get user's current access and upsert this bucket entry.
+		access, err := m.client.GetUserBucketAccess(ctx, username)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		found := false
+		for i, a := range access {
+			if a.Bucket == bucket.name {
+				access[i].Permission = perm
+				found = true
+				break
+			}
+		}
+		if !found {
+			access = append(access, model.BucketAccess{Bucket: bucket.name, Permission: perm})
+		}
+		err = m.client.SetUserBucketAccess(ctx, username, access)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		users := make([]model.UserPermission, 0, len(m.bucketUsers)+1)
+		replaced := false
+		for _, item := range m.bucketUsers {
+			if item.username == username {
+				users = append(users, model.UserPermission{Username: username, Permission: perm})
+				replaced = true
+				continue
+			}
+			users = append(users, model.UserPermission{Username: item.username, Permission: item.permission})
+		}
+		if !replaced {
+			users = append(users, model.UserPermission{Username: username, Permission: perm})
+		}
+		return bucketAccessUpdatedMsg{
+			bucket:  bucket.name,
+			message: fmt.Sprintf("Added %s with %s access", username, perm),
+			users:   users,
+		}
+	}
+}
+
+func (m bucketsModel) updateBucketDetailConfirmRemoveUser(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		idx := m.userIndex()
+		if idx >= 0 && idx < len(m.bucketUsers) {
+			u := m.bucketUsers[idx]
+			bucket := m.items[m.cursor]
+			username := u.username
+			m.loading = true
+			m.mode = bucketDetail
+
+			return m, func() tea.Msg {
+				ctx := context.Background()
+				// Get user's full access, remove entry for this bucket
+				access, err := m.client.GetUserBucketAccess(ctx, username)
+				if err != nil {
+					return errMsg{err: err}
+				}
+				updated := make([]model.BucketAccess, 0, len(access))
+				for _, a := range access {
+					if a.Bucket != bucket.name {
+						updated = append(updated, a)
+					}
+				}
+				err = m.client.SetUserBucketAccess(ctx, username, updated)
+				if err != nil {
+					return errMsg{err: err}
+				}
+				users := make([]model.UserPermission, 0, len(m.bucketUsers)-1)
+				for _, item := range m.bucketUsers {
+					if item.username == username {
+						continue
+					}
+					users = append(users, model.UserPermission{Username: item.username, Permission: item.permission})
+				}
+				return bucketAccessUpdatedMsg{
+					bucket:  bucket.name,
+					message: fmt.Sprintf("Removed %s access to %s", username, bucket.name),
+					users:   users,
+				}
+			}
+		}
+		m.mode = bucketDetail
+	default:
+		m.mode = bucketDetail
 	}
 	return m, nil
 }
@@ -513,8 +883,8 @@ func (m bucketsModel) toggleSelected() (bucketsModel, tea.Cmd) {
 		return m, textinput.Blink
 	}
 
-	// Toggle a prefix
-	idx := m.detailCursor - 1
+	// Toggle a prefix (offset by user rows)
+	idx := m.prefixIndex()
 	if idx < 0 || idx >= len(m.prefixes) {
 		return m, nil
 	}
@@ -632,12 +1002,31 @@ func (m bucketsModel) loadPrefixes() tea.Cmd {
 	}
 }
 
+// loadBucketUsers fetches the list of users with access to the currently selected bucket.
+func (m bucketsModel) loadBucketUsers() tea.Cmd {
+	bucket := m.items[m.cursor]
+	return func() tea.Msg {
+		ctx := context.Background()
+		users, err := m.client.ListBucketUsers(ctx, bucket.name)
+		if err != nil {
+			return bucketUsersLoadedMsg{bucket: bucket.name, err: err}
+		}
+		return bucketUsersLoadedMsg{bucket: bucket.name, users: users}
+	}
+}
+
 // --- Views ---
 
 func (m bucketsModel) view() string {
 	switch m.mode {
 	case bucketDetail, bucketDetailAddPrefix, bucketDetailConfirm, bucketDetailDeleteFolder:
 		return m.viewDetail()
+	case bucketDetailPickUser:
+		return m.viewPickUser()
+	case bucketDetailPickPerm:
+		return m.viewPickPerm()
+	case bucketDetailConfirmRemoveUser:
+		return m.viewConfirmRemoveUser()
 	default:
 		return m.viewList()
 	}
@@ -816,6 +1205,33 @@ func (m bucketsModel) viewDetail() string {
 		s += rowStyle.Render(row) + "\n"
 	}
 
+	// USER ACCESS section
+	if m.bucketUsersLoading {
+		s += "\n  " + dimStyle.Render("Loading user access...") + "\n"
+	} else {
+		s += "\n"
+		s += fmt.Sprintf("  %s\n", tableHeaderStyle.Render(fmt.Sprintf("  %-30s %s", fmt.Sprintf("USER ACCESS (%d)", len(m.bucketUsers)), "PERMISSION")))
+		if m.bucketUsersError != "" {
+			s += "  " + errorStyle.Render(m.bucketUsersError) + "\n"
+		} else if len(m.bucketUsers) == 0 {
+			s += "  " + dimStyle.Render("No users assigned.") + "\n"
+		} else {
+			for i, u := range m.bucketUsers {
+				cursor := "  "
+				if m.detailCursor == i+1 {
+					cursor = "> "
+				}
+				uname := pad(u.username, 30)
+				permStr := string(u.permission)
+				if m.detailCursor == i+1 {
+					uname = rowSelectedStyle.Render(pad(u.username, 30))
+					permStr = rowSelectedStyle.Render(string(u.permission))
+				}
+				s += fmt.Sprintf("%s  %s  %s\n", cursor, uname, permStr)
+			}
+		}
+	}
+
 	s += "\n"
 
 	// Show browse items if we've drilled into a prefix, otherwise show prefix list
@@ -908,7 +1324,7 @@ func (m bucketsModel) viewDetail() string {
 					url = "  " + dimStyle.Render(publicURL(bucket.name, p.prefix))
 				}
 				row := fmt.Sprintf("    %s  %s %s%s", pad(p.prefix, 30), icon, label, url)
-				if m.detailCursor == i+1 {
+				if m.detailCursor == len(m.bucketUsers)+i+1 {
 					s += rowSelectedStyle.Width(detailWidth).Render(row) + "\n"
 				} else {
 					s += rowStyle.Render(row) + "\n"
@@ -934,7 +1350,72 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [p] Add prefix  [d] Delete prefix  [r] Refresh  [←] Back")
+		// Context-sensitive help bar
+		switch m.cursorSection() {
+		case "bucket":
+			s += "\n" + helpStyle.Render("  [enter] Toggle public/private  [a] Add user  [r] Refresh  [esc] Back")
+		case "users":
+			s += "\n" + helpStyle.Render("  [enter] Cycle permission  [a] Add user  [d] Remove  [r] Refresh  [esc] Back")
+		case "prefixes":
+			s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [p] Add prefix  [d] Delete prefix  [r] Refresh  [←] Back")
+		}
+	}
+	return s
+}
+
+func (m bucketsModel) viewPickUser() string {
+	bucket := m.items[m.cursor]
+	s := breadcrumbStyle.Render(fmt.Sprintf("dashboard > buckets > %s > Add user", bucket.name)) + "\n"
+	s += screenTitleStyle.Render("Select a user:") + "\n\n"
+
+	if m.loading {
+		s += fmt.Sprintf(" %s Loading users...\n", m.spinner.View())
+		return s
+	}
+
+	if len(m.availableUsers) == 0 {
+		s += "  All managed users are already assigned.\n\n"
+		s += helpStyle.Render("  [esc] Back")
+		return s
+	}
+
+	for i, u := range m.availableUsers {
+		cursor := "  "
+		if i == m.userPickerCursor {
+			cursor = "> "
+		}
+		name := pad(u.name, 30)
+		created := u.created
+		if i == m.userPickerCursor {
+			name = rowSelectedStyle.Render(pad(u.name, 30))
+			created = rowSelectedStyle.Render(u.created)
+		}
+		s += fmt.Sprintf("%s%s %s\n", cursor, name, created)
+	}
+
+	s += "\n" + helpStyle.Render("  [enter] Select  [esc] Cancel")
+	return s
+}
+
+func (m bucketsModel) viewPickPerm() string {
+	bucket := m.items[m.cursor]
+	s := breadcrumbStyle.Render(fmt.Sprintf("dashboard > buckets > %s > Add user", bucket.name)) + "\n"
+	s += screenTitleStyle.Render(fmt.Sprintf("Permission for %q:", m.pendingUser)) + "\n\n"
+
+	s += "  [1] read\n"
+	s += "  [2] read-write\n"
+	s += "  [3] read-write-delete\n\n"
+
+	s += helpStyle.Render("  Press 1, 2, or 3  [esc] Cancel")
+	return s
+}
+
+func (m bucketsModel) viewConfirmRemoveUser() string {
+	bucket := m.items[m.cursor]
+	s := breadcrumbStyle.Render(fmt.Sprintf("dashboard > buckets > %s", bucket.name)) + "\n"
+	idx := m.userIndex()
+	if idx >= 0 && idx < len(m.bucketUsers) {
+		s += warningStyle.Render(fmt.Sprintf("Remove %q access to this bucket? [y/N]", m.bucketUsers[idx].username))
 	}
 	return s
 }

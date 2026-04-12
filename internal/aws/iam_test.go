@@ -2,12 +2,19 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/url"
 	"testing"
 	"time"
+
+	"github.com/aws/smithy-go"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+
+	"github.com/dcorbell/s3m/internal/model"
 )
 
 type mockIAM struct {
@@ -22,9 +29,14 @@ type mockIAM struct {
 	deleteAccessKeyErr     error
 	listAccessKeysOutput   *iam.ListAccessKeysOutput
 	putUserPolicyErr       error
+	putUserPolicyInput     *iam.PutUserPolicyInput
 	deleteUserPolicyErr    error
+	deleteUserPolicyCalled bool
 	listUserPoliciesOutput *iam.ListUserPoliciesOutput
 	listUserTagsOutput     *iam.ListUserTagsOutput
+	getUserPolicyOutput    *iam.GetUserPolicyOutput
+	getUserPolicyErr       error
+	getUserPolicyFunc      func(username string) (*iam.GetUserPolicyOutput, error)
 }
 
 func (m *mockIAM) CreateUser(ctx context.Context, params *iam.CreateUserInput, optFns ...func(*iam.Options)) (*iam.CreateUserOutput, error) {
@@ -60,11 +72,20 @@ func (m *mockIAM) ListAccessKeys(ctx context.Context, params *iam.ListAccessKeys
 }
 
 func (m *mockIAM) PutUserPolicy(ctx context.Context, params *iam.PutUserPolicyInput, optFns ...func(*iam.Options)) (*iam.PutUserPolicyOutput, error) {
+	m.putUserPolicyInput = params
 	return nil, m.putUserPolicyErr
 }
 
 func (m *mockIAM) DeleteUserPolicy(ctx context.Context, params *iam.DeleteUserPolicyInput, optFns ...func(*iam.Options)) (*iam.DeleteUserPolicyOutput, error) {
+	m.deleteUserPolicyCalled = true
 	return nil, m.deleteUserPolicyErr
+}
+
+func (m *mockIAM) GetUserPolicy(ctx context.Context, params *iam.GetUserPolicyInput, optFns ...func(*iam.Options)) (*iam.GetUserPolicyOutput, error) {
+	if m.getUserPolicyFunc != nil {
+		return m.getUserPolicyFunc(awssdk.ToString(params.UserName))
+	}
+	return m.getUserPolicyOutput, m.getUserPolicyErr
 }
 
 func (m *mockIAM) ListUserPolicies(ctx context.Context, params *iam.ListUserPoliciesInput, optFns ...func(*iam.Options)) (*iam.ListUserPoliciesOutput, error) {
@@ -138,7 +159,10 @@ func TestCreateManagedUser(t *testing.T) {
 	}
 	client := &Client{IAM: mock, Account: "123456789012"}
 
-	key, err := client.CreateManagedUser(context.Background(), "s3m-newuser", []string{"my-bucket"})
+	accesses := []model.BucketAccess{
+		{Bucket: "my-bucket", Permission: model.PermReadWrite},
+	}
+	key, err := client.CreateManagedUser(context.Background(), "s3m-newuser", accesses)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -147,5 +171,369 @@ func TestCreateManagedUser(t *testing.T) {
 	}
 	if key.SecretAccessKey != "secret123" {
 		t.Errorf("expected 'secret123', got %q", key.SecretAccessKey)
+	}
+}
+
+func TestActionsForPermission(t *testing.T) {
+	tests := []struct {
+		level    model.PermissionLevel
+		expected []string
+	}{
+		{model.PermRead, []string{"s3:GetObject", "s3:ListBucket"}},
+		{model.PermReadWrite, []string{
+			"s3:GetObject", "s3:PutObject", "s3:ListBucket",
+			"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
+		}},
+		{model.PermReadWriteDelete, []string{
+			"s3:GetObject", "s3:PutObject", "s3:ListBucket",
+			"s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:ListBucketMultipartUploads",
+			"s3:DeleteObject",
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.level), func(t *testing.T) {
+			actions := actionsForPermission(tt.level)
+			if len(actions) != len(tt.expected) {
+				t.Fatalf("expected %d actions, got %d: %v", len(tt.expected), len(actions), actions)
+			}
+			for i, a := range actions {
+				if a != tt.expected[i] {
+					t.Errorf("action[%d]: expected %q, got %q", i, tt.expected[i], a)
+				}
+			}
+		})
+	}
+}
+
+func TestPermissionFromActions(t *testing.T) {
+	tests := []struct {
+		name     string
+		actions  []string
+		expected model.PermissionLevel
+	}{
+		{"read only", []string{"s3:GetObject", "s3:ListBucket"}, model.PermRead},
+		{"read-write", []string{"s3:GetObject", "s3:PutObject", "s3:ListBucket"}, model.PermReadWrite},
+		{"read-write-delete", []string{"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"}, model.PermReadWriteDelete},
+		{"just delete implies rwd", []string{"s3:DeleteObject"}, model.PermReadWriteDelete},
+		{"just put implies rw", []string{"s3:PutObject"}, model.PermReadWrite},
+		{"empty actions", []string{}, model.PermRead},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := permissionFromActions(tt.actions)
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestGetUserBucketAccess(t *testing.T) {
+	// Build a policy with two statements (new format)
+	policy := map[string]interface{}{
+		"Version": "2012-10-17",
+		"Statement": []map[string]interface{}{
+			{
+				"Sid":    "s3m0",
+				"Effect": "Allow",
+				"Action": []string{"s3:GetObject", "s3:ListBucket"},
+				"Resource": []string{
+					"arn:aws:s3:::bucket-a",
+					"arn:aws:s3:::bucket-a/*",
+				},
+			},
+			{
+				"Sid":    "s3m1",
+				"Effect": "Allow",
+				"Action": []string{"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"},
+				"Resource": []string{
+					"arn:aws:s3:::bucket-b",
+					"arn:aws:s3:::bucket-b/*",
+				},
+			},
+		},
+	}
+	policyJSON, _ := json.Marshal(policy)
+	encoded := url.QueryEscape(string(policyJSON))
+
+	mock := &mockIAM{
+		getUserPolicyOutput: &iam.GetUserPolicyOutput{
+			PolicyDocument: awssdk.String(encoded),
+		},
+	}
+	client := &Client{IAM: mock}
+
+	accesses, err := client.GetUserBucketAccess(context.Background(), "s3m-testuser")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(accesses) != 2 {
+		t.Fatalf("expected 2 accesses, got %d", len(accesses))
+	}
+	if accesses[0].Bucket != "bucket-a" || accesses[0].Permission != model.PermRead {
+		t.Errorf("access[0]: expected bucket-a/read, got %s/%s", accesses[0].Bucket, accesses[0].Permission)
+	}
+	if accesses[1].Bucket != "bucket-b" || accesses[1].Permission != model.PermReadWriteDelete {
+		t.Errorf("access[1]: expected bucket-b/read-write-delete, got %s/%s", accesses[1].Bucket, accesses[1].Permission)
+	}
+}
+
+func TestGetUserBucketAccessLegacy(t *testing.T) {
+	// Legacy format: single statement, no s3m- prefix Sid, multiple bucket ARNs
+	policy := map[string]interface{}{
+		"Version": "2012-10-17",
+		"Statement": []map[string]interface{}{
+			{
+				"Effect": "Allow",
+				"Action": []string{"s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"},
+				"Resource": []string{
+					"arn:aws:s3:::legacy-bucket-1",
+					"arn:aws:s3:::legacy-bucket-1/*",
+					"arn:aws:s3:::legacy-bucket-2",
+					"arn:aws:s3:::legacy-bucket-2/*",
+				},
+			},
+		},
+	}
+	policyJSON, _ := json.Marshal(policy)
+	encoded := url.QueryEscape(string(policyJSON))
+
+	mock := &mockIAM{
+		getUserPolicyOutput: &iam.GetUserPolicyOutput{
+			PolicyDocument: awssdk.String(encoded),
+		},
+	}
+	client := &Client{IAM: mock}
+
+	accesses, err := client.GetUserBucketAccess(context.Background(), "s3m-legacy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(accesses) != 2 {
+		t.Fatalf("expected 2 accesses, got %d", len(accesses))
+	}
+	for _, a := range accesses {
+		if a.Permission != model.PermReadWriteDelete {
+			t.Errorf("legacy bucket %q: expected read-write-delete, got %s", a.Bucket, a.Permission)
+		}
+	}
+}
+
+func TestGetUserBucketAccessNoPolicy(t *testing.T) {
+	mock := &mockIAM{
+		getUserPolicyErr: &smithy.GenericAPIError{Code: "NoSuchEntity", Message: "policy not found"},
+	}
+	client := &Client{IAM: mock}
+
+	accesses, err := client.GetUserBucketAccess(context.Background(), "s3m-nopolicy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(accesses) != 0 {
+		t.Fatalf("expected 0 accesses, got %d", len(accesses))
+	}
+}
+
+func TestSetUserBucketAccess(t *testing.T) {
+	mock := &mockIAM{}
+	client := &Client{IAM: mock}
+
+	accesses := []model.BucketAccess{
+		{Bucket: "bucket-x", Permission: model.PermRead},
+		{Bucket: "bucket-y", Permission: model.PermReadWriteDelete},
+	}
+	err := client.SetUserBucketAccess(context.Background(), "s3m-setuser", accesses)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if mock.putUserPolicyInput == nil {
+		t.Fatal("PutUserPolicy was not called")
+	}
+
+	// Parse the policy document to verify structure
+	var doc struct {
+		Version   string `json:"Version"`
+		Statement []struct {
+			Sid      string   `json:"Sid"`
+			Effect   string   `json:"Effect"`
+			Action   []string `json:"Action"`
+			Resource []string `json:"Resource"`
+		} `json:"Statement"`
+	}
+	if err := json.Unmarshal([]byte(awssdk.ToString(mock.putUserPolicyInput.PolicyDocument)), &doc); err != nil {
+		t.Fatalf("could not parse policy document: %v", err)
+	}
+
+	if len(doc.Statement) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(doc.Statement))
+	}
+	if doc.Statement[0].Sid != "s3m0" {
+		t.Errorf("statement[0].Sid: expected 's3m0', got %q", doc.Statement[0].Sid)
+	}
+	if doc.Statement[0].Effect != "Allow" {
+		t.Errorf("statement[0].Effect: expected 'Allow', got %q", doc.Statement[0].Effect)
+	}
+	// read permission should have 2 actions
+	if len(doc.Statement[0].Action) != 2 {
+		t.Errorf("statement[0] expected 2 actions (read), got %d", len(doc.Statement[0].Action))
+	}
+	// read-write-delete should have 7 actions
+	if len(doc.Statement[1].Action) != 7 {
+		t.Errorf("statement[1] expected 7 actions (read-write-delete), got %d", len(doc.Statement[1].Action))
+	}
+}
+
+func TestSetUserBucketAccessEmpty(t *testing.T) {
+	mock := &mockIAM{}
+	client := &Client{IAM: mock}
+
+	err := client.SetUserBucketAccess(context.Background(), "s3m-emptyuser", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !mock.deleteUserPolicyCalled {
+		t.Error("expected DeleteUserPolicy to be called")
+	}
+	if mock.putUserPolicyInput != nil {
+		t.Error("PutUserPolicy should not have been called")
+	}
+}
+
+func TestBuildBucketPolicyWithPermissions(t *testing.T) {
+	accesses := []model.BucketAccess{
+		{Bucket: "read-bucket", Permission: model.PermRead},
+		{Bucket: "rw-bucket", Permission: model.PermReadWrite},
+		{Bucket: "rwd-bucket", Permission: model.PermReadWriteDelete},
+	}
+
+	policy := buildBucketPolicyWithPermissions(accesses)
+
+	if policy["Version"] != "2012-10-17" {
+		t.Errorf("expected Version '2012-10-17', got %v", policy["Version"])
+	}
+
+	stmts, ok := policy["Statement"].([]map[string]interface{})
+	if !ok {
+		t.Fatal("Statement is not []map[string]interface{}")
+	}
+	if len(stmts) != 3 {
+		t.Fatalf("expected 3 statements, got %d", len(stmts))
+	}
+
+	// Verify each statement
+	expectations := []struct {
+		sid         string
+		actionCount int
+	}{
+		{"s3m0", 2},
+		{"s3m1", 6},
+		{"s3m2", 7},
+	}
+	for i, exp := range expectations {
+		if stmts[i]["Sid"] != exp.sid {
+			t.Errorf("statement[%d].Sid: expected %q, got %v", i, exp.sid, stmts[i]["Sid"])
+		}
+		actions, ok := stmts[i]["Action"].([]string)
+		if !ok {
+			t.Fatalf("statement[%d].Action is not []string", i)
+		}
+		if len(actions) != exp.actionCount {
+			t.Errorf("statement[%d] expected %d actions, got %d: %v", i, exp.actionCount, len(actions), actions)
+		}
+		resources, ok := stmts[i]["Resource"].([]string)
+		if !ok {
+			t.Fatalf("statement[%d].Resource is not []string", i)
+		}
+		if len(resources) != 2 {
+			t.Errorf("statement[%d] expected 2 resources, got %d", i, len(resources))
+		}
+	}
+}
+
+func TestListBucketUsers(t *testing.T) {
+	now := time.Now()
+
+	// Helper to build a URL-encoded policy document for a given set of bucket accesses.
+	buildEncodedPolicy := func(accesses []model.BucketAccess) string {
+		policy := buildBucketPolicyWithPermissions(accesses)
+		policyJSON, _ := json.Marshal(policy)
+		return url.QueryEscape(string(policyJSON))
+	}
+
+	// alice: has target-bucket with read
+	alicePolicy := buildEncodedPolicy([]model.BucketAccess{
+		{Bucket: "target-bucket", Permission: model.PermRead},
+	})
+	// bob: has target-bucket with read-write-delete
+	bobPolicy := buildEncodedPolicy([]model.BucketAccess{
+		{Bucket: "target-bucket", Permission: model.PermReadWriteDelete},
+	})
+	// charlie: has a different bucket only
+	charliePolicy := buildEncodedPolicy([]model.BucketAccess{
+		{Bucket: "other-bucket", Permission: model.PermReadWrite},
+	})
+
+	mock := &mockIAM{
+		listUsersOutput: &iam.ListUsersOutput{
+			Users: []iamtypes.User{
+				{UserName: awssdk.String("s3m-alice"), Arn: awssdk.String("arn:aws:iam::123:user/s3m-alice"), CreateDate: &now},
+				{UserName: awssdk.String("s3m-bob"), Arn: awssdk.String("arn:aws:iam::123:user/s3m-bob"), CreateDate: &now},
+				{UserName: awssdk.String("s3m-charlie"), Arn: awssdk.String("arn:aws:iam::123:user/s3m-charlie"), CreateDate: &now},
+			},
+		},
+		listUserTagsOutput: &iam.ListUserTagsOutput{
+			Tags: []iamtypes.Tag{
+				{Key: awssdk.String("s3m:managed"), Value: awssdk.String("true")},
+			},
+		},
+		listAccessKeysOutput: &iam.ListAccessKeysOutput{
+			AccessKeyMetadata: []iamtypes.AccessKeyMetadata{
+				{AccessKeyId: awssdk.String("AKIA123")},
+			},
+		},
+		getUserPolicyFunc: func(username string) (*iam.GetUserPolicyOutput, error) {
+			var encoded string
+			switch username {
+			case "s3m-alice":
+				encoded = alicePolicy
+			case "s3m-bob":
+				encoded = bobPolicy
+			case "s3m-charlie":
+				encoded = charliePolicy
+			default:
+				return nil, fmt.Errorf("unexpected user %q", username)
+			}
+			return &iam.GetUserPolicyOutput{
+				PolicyDocument: awssdk.String(encoded),
+			}, nil
+		},
+	}
+	client := &Client{IAM: mock}
+
+	perms, err := client.ListBucketUsers(context.Background(), "target-bucket")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(perms) != 2 {
+		t.Fatalf("expected 2 users with access, got %d", len(perms))
+	}
+
+	// Build a map for order-independent assertions (goroutines may return in any order).
+	permMap := make(map[string]model.PermissionLevel, len(perms))
+	for _, p := range perms {
+		permMap[p.Username] = p.Permission
+	}
+	if permMap["s3m-alice"] != model.PermRead {
+		t.Errorf("alice: expected %q, got %q", model.PermRead, permMap["s3m-alice"])
+	}
+	if permMap["s3m-bob"] != model.PermReadWriteDelete {
+		t.Errorf("bob: expected %q, got %q", model.PermReadWriteDelete, permMap["s3m-bob"])
+	}
+	if _, ok := permMap["s3m-charlie"]; ok {
+		t.Error("charlie should not have access to target-bucket")
 	}
 }

@@ -10,12 +10,30 @@ type Bucket struct {
 	ObjectCount  int64
 }
 
+type PermissionLevel string
+
+const (
+	PermRead            PermissionLevel = "read"
+	PermReadWrite       PermissionLevel = "read-write"
+	PermReadWriteDelete PermissionLevel = "read-write-delete"
+)
+
+type BucketAccess struct {
+	Bucket     string
+	Permission PermissionLevel
+}
+
+type UserPermission struct {
+	Username   string
+	Permission PermissionLevel
+}
+
 type User struct {
-	Name       string
-	ARN        string
-	CreateDate time.Time
-	Buckets    []string
-	KeyCount   int
+	Name         string
+	ARN          string
+	CreateDate   time.Time
+	BucketAccess []BucketAccess
+	KeyCount     int
 }
 
 type AccessKey struct {
