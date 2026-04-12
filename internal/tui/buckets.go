@@ -273,6 +273,24 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				m.offset = m.cursor - visible + 1
 			}
 		}
+	case "pgup":
+		visible := m.visibleRows()
+		m.cursor -= visible
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		if m.cursor < m.offset {
+			m.offset = m.cursor
+		}
+	case "pgdown":
+		visible := m.visibleRows()
+		m.cursor += visible
+		if m.cursor >= len(m.items) {
+			m.cursor = len(m.items) - 1
+		}
+		if m.cursor >= m.offset+visible {
+			m.offset = m.cursor - visible + 1
+		}
 	case "c":
 		m.mode = bucketsCreate
 		m.nameInput.SetValue("")
@@ -987,6 +1005,24 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			if m.browseCursor >= m.browseOffset+visible {
 				m.browseOffset = m.browseCursor - visible + 1
 			}
+		}
+	case "pgup":
+		visible := m.browseVisibleRows()
+		m.browseCursor -= visible
+		if m.browseCursor < 0 {
+			m.browseCursor = 0
+		}
+		if m.browseCursor < m.browseOffset {
+			m.browseOffset = m.browseCursor
+		}
+	case "pgdown":
+		visible := m.browseVisibleRows()
+		m.browseCursor += visible
+		if m.browseCursor >= len(m.browseItems) {
+			m.browseCursor = len(m.browseItems) - 1
+		}
+		if m.browseCursor >= m.browseOffset+visible {
+			m.browseOffset = m.browseCursor - visible + 1
 		}
 	case "right", "l":
 		// Drill into folder

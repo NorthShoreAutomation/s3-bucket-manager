@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Page Up / Page Down keyboard navigation in bucket list and file browser views
+
 ## [0.1.0] - 2026-04-10
 ### Added
 - s3m - Go TUI for S3 bucket, user, and access management (#1)
