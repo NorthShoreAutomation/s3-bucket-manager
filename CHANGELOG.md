@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Download file from S3 via `[g]` (get) key in file browser — saves selected file to current working directory
+- Upload file to S3 via `[p]` (put) key in file browser — opens a local file picker that mirrors the S3 browser's look and feel for filesystem navigation and file selection
+
+### Changed
+- Renamed "add prefix" keybinding from `[p]` to `[c]` in prefix list view for consistency with bucket list's `[c] Create`
 
 ## [0.4.0] - 2026-04-12
 ### Added

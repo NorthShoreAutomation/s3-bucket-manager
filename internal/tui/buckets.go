@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -92,6 +95,10 @@ type bucketsModel struct {
 	folderDeleteKey    string                 // key of folder being deleted
 	folderDeleteCnt    int64                  // object count for folder delete confirm
 	folderDeletePublic bool                   // whether the folder being deleted also has public access
+
+	// File picker fields
+	filePicker     filePickerModel
+	showFilePicker bool
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -318,6 +325,19 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	case folderDeleteProgressMsg:
 		m.deleteProgress = fmt.Sprintf("Deleting folder... %s objects removed", formatWithCommas(msg.deleted))
 		return m, nil
+
+	case downloadDoneMsg:
+		m.loading = false
+		m.detailMessage = fmt.Sprintf("Downloaded %s to %s", msg.filename, msg.path)
+		m.deleteProgress = ""
+		return m, nil
+
+	case uploadDoneMsg:
+		m.loading = false
+		m.detailMessage = fmt.Sprintf("Uploaded %s", msg.filename)
+		m.deleteProgress = ""
+		// Reload the browse view to show the new file
+		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 
 	case spinner.TickMsg:
 		if m.loading {
@@ -708,7 +728,7 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				})
 			}
 		}
-	case "p":
+	case "c":
 		m.mode = bucketDetailAddPrefix
 		m.prefixInput.SetValue("")
 		m.prefixInput.Focus()
@@ -1253,6 +1273,12 @@ func (m bucketsModel) viewDetail() string {
 
 	s += "\n"
 
+	// When file picker is active, render it instead of the browse/prefix view
+	if m.showFilePicker {
+		s += m.filePicker.view(detailWidth)
+		return s
+	}
+
 	// Show browse items if we've drilled into a prefix, otherwise show prefix list
 	if len(m.browseItems) > 0 || m.browsePrefix != "" {
 		// Browsing contents
@@ -1328,7 +1354,7 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
+		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [g] Download  [p] Upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
 	} else {
 		// Prefix list
 		if len(m.prefixes) > 0 {
@@ -1376,7 +1402,7 @@ func (m bucketsModel) viewDetail() string {
 		case "users":
 			s += "\n" + helpStyle.Render("  [enter] Cycle permission  [a] Add user  [d] Remove  [r] Refresh  [esc] Back")
 		case "prefixes":
-			s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [p] Add prefix  [d] Delete prefix  [r] Refresh  [←] Back")
+			s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [c] Add prefix  [d] Delete prefix  [r] Refresh  [←] Back")
 		}
 	}
 	return s
@@ -1472,6 +1498,42 @@ func (m bucketsModel) browseVisibleRows() int {
 }
 
 func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	// When the file picker is active, delegate all keys to it
+	if m.showFilePicker {
+		fp, cmd, selected := m.filePicker.update(msg)
+		m.filePicker = fp
+		m.filePicker.width = m.width
+		m.filePicker.height = m.height
+		if msg.String() == "esc" {
+			m.showFilePicker = false
+			return m, nil
+		}
+		if selected != "" {
+			// File selected — start upload
+			m.showFilePicker = false
+			m.loading = true
+			bucket := m.items[m.cursor]
+			prefix := m.browsePrefix
+			filename := filepath.Base(selected)
+			m.deleteProgress = fmt.Sprintf("Uploading %s...", filename)
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				ctx := context.Background()
+				f, err := os.Open(selected)
+				if err != nil {
+					return errMsg{err: fmt.Errorf("could not open %s: %w", selected, err)}
+				}
+				defer f.Close()
+				key := prefix + filename
+				err = m.client.UploadObject(ctx, bucket.name, key, bucket.region, f)
+				if err != nil {
+					return errMsg{err: err}
+				}
+				return uploadDoneMsg{filename: filename}
+			})
+		}
+		return m, cmd
+	}
+
 	switch msg.String() {
 	case "up", "k":
 		if m.browseCursor > 0 {
@@ -1584,6 +1646,45 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			m.confirmInput2.Focus()
 			return m, textinput.Blink
 		}
+	case "g":
+		// Download selected file to current working directory
+		if m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
+			item := m.browseItems[m.browseCursor]
+			bucket := m.items[m.cursor]
+			m.loading = true
+			m.deleteProgress = fmt.Sprintf("Downloading %s...", item.Name)
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				ctx := context.Background()
+				cwd, err := os.Getwd()
+				if err != nil {
+					return errMsg{err: fmt.Errorf("could not get working directory: %w", err)}
+				}
+				body, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
+				if err != nil {
+					return errMsg{err: fmt.Errorf("could not download %s: %w", item.Name, err)}
+				}
+				defer body.Close()
+				outPath := filepath.Join(cwd, item.Name)
+				f, err := os.Create(outPath)
+				if err != nil {
+					return errMsg{err: fmt.Errorf("could not create file %s: %w", outPath, err)}
+				}
+				defer f.Close()
+				if _, err := io.Copy(f, body); err != nil {
+					return errMsg{err: fmt.Errorf("could not write file %s: %w", outPath, err)}
+				}
+				return downloadDoneMsg{filename: item.Name, path: outPath}
+			})
+		}
+	case "p":
+		// Open local file picker for upload
+		fp := newFilePicker()
+		fp.width = m.width
+		fp.height = m.height
+		fp = fp.loadDir()
+		m.filePicker = fp
+		m.showFilePicker = true
+		return m, nil
 	case "r":
 		m.loading = true
 		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())

@@ -127,6 +127,8 @@ func (a App) viewHelp() string {
 	s += "  u       Open users\n"
 	s += "  c       Create new item / copy URL\n"
 	s += "  d       Delete selected item\n"
+	s += "  g       Download selected file\n"
+	s += "  p       Upload file to current folder\n"
 	s += "  enter   Select / drill in\n"
 	s += "  pgup    Page up in lists\n"
 	s += "  pgdn    Page down in lists\n"
@@ -247,6 +249,15 @@ type folderCountedMsg struct {
 
 type folderDeleteProgressMsg struct {
 	deleted int64
+}
+
+type downloadDoneMsg struct {
+	filename string
+	path     string
+}
+
+type uploadDoneMsg struct {
+	filename string
 }
 
 type userAccessLoadedMsg struct {
