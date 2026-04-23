@@ -14,8 +14,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// makeResponse is a convenience helper that returns a 200 response with the
-// given body string.
+// makeResponse returns a response with the given status and body.
 func makeResponse(status int, body string) *http.Response {
 	return &http.Response{
 		StatusCode: status,
@@ -24,29 +23,32 @@ func makeResponse(status int, body string) *http.Response {
 	}
 }
 
-// csrfHTML is a minimal WeTransfer home page response containing a CSRF token.
-const csrfHTML = `<html><head><meta name="csrf-token" content="CSRFTOKEN123"></head></html>`
-
-// happyPathTransport stubs exactly two endpoints used by ResolveDirectLink.
-func happyPathTransport(t *testing.T, expectRecipientID string) roundTripFunc {
+// happyPathTransport stubs the single POST /download endpoint that
+// ResolveDirectLink invokes. expectSecHash is the security_hash value the
+// request body is asserted against; expectRecipientID is the recipient_id,
+// or empty when the share URL does not include one.
+func happyPathTransport(t *testing.T, transferID, expectSecHash, expectRecipientID, expectOrigin string) roundTripFunc {
 	t.Helper()
 	return func(r *http.Request) (*http.Response, error) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.String() == "https://wetransfer.com/":
-			return makeResponse(http.StatusOK, csrfHTML), nil
-
 		case r.Method == http.MethodPost &&
-			r.URL.String() == "https://wetransfer.com/api/v4/transfers/TRANSFERID/download":
+			r.URL.String() == "https://wetransfer.com/api/v4/transfers/"+transferID+"/download":
 
-			// Verify CSRF header
-			if got := r.Header.Get("x-csrf-token"); got != "CSRFTOKEN123" {
-				t.Errorf("x-csrf-token = %q; want CSRFTOKEN123", got)
-			}
 			if got := r.Header.Get("x-requested-with"); got != "XMLHttpRequest" {
 				t.Errorf("x-requested-with = %q; want XMLHttpRequest", got)
 			}
+			if got := r.Header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q; want application/json", got)
+			}
+			if expectOrigin != "" {
+				if got := r.Header.Get("Origin"); got != expectOrigin {
+					t.Errorf("Origin = %q; want %q", got, expectOrigin)
+				}
+				if got := r.Header.Get("Referer"); got == "" {
+					t.Errorf("Referer header missing")
+				}
+			}
 
-			// Verify request body
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Fatalf("could not read POST body: %v", err)
@@ -58,17 +60,15 @@ func happyPathTransport(t *testing.T, expectRecipientID string) roundTripFunc {
 			if got := payload["intent"]; got != "entire_transfer" {
 				t.Errorf("intent = %q; want entire_transfer", got)
 			}
-			if got := payload["security_hash"]; got != "HASH" {
-				t.Errorf("security_hash = %q; want HASH", got)
+			if got := payload["security_hash"]; got != expectSecHash {
+				t.Errorf("security_hash = %q; want %q", got, expectSecHash)
 			}
 			if expectRecipientID != "" {
 				if got := payload["recipient_id"]; got != expectRecipientID {
 					t.Errorf("recipient_id = %q; want %q", got, expectRecipientID)
 				}
-			} else {
-				if _, ok := payload["recipient_id"]; ok {
-					t.Errorf("recipient_id present in body but should be absent")
-				}
+			} else if _, ok := payload["recipient_id"]; ok {
+				t.Errorf("recipient_id present in body but should be absent")
 			}
 
 			return makeResponse(http.StatusOK, `{"direct_link":"https://download.example/abc"}`), nil
@@ -81,56 +81,58 @@ func happyPathTransport(t *testing.T, expectRecipientID string) roundTripFunc {
 }
 
 func clientWithTransport(rt http.RoundTripper) *http.Client {
-	// We intentionally omit a Jar here to exercise the ensureJar wrapping path.
 	return &http.Client{Transport: rt}
 }
 
-func TestResolveDirectLink_happyPath(t *testing.T) {
-	client := clientWithTransport(happyPathTransport(t, ""))
+func TestResolveDirectLink_threeSegmentShare(t *testing.T) {
+	client := clientWithTransport(happyPathTransport(t, "TRANSFERID", "HASH", "", "https://foo.wetransfer.com"))
 
 	directURL, filename, err := ResolveDirectLink(
 		context.Background(),
 		client,
 		"https://foo.wetransfer.com/downloads/TRANSFERID/HASH",
 	)
-
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if directURL != "https://download.example/abc" {
 		t.Errorf("directURL = %q; want https://download.example/abc", directURL)
 	}
-	if filename != "TRANSFERID.zip" {
-		t.Errorf("filename = %q; want TRANSFERID.zip", filename)
+	if filename != "TRANSFERID" {
+		t.Errorf("filename = %q; want TRANSFERID", filename)
 	}
 }
 
-func TestResolveDirectLink_withRecipientID(t *testing.T) {
-	client := clientWithTransport(happyPathTransport(t, "RID"))
+// TestResolveDirectLink_fourSegmentShare verifies the current WeTransfer
+// 4-segment layout: /downloads/<transfer>/<recipient>/<security_hash>.
+func TestResolveDirectLink_fourSegmentShare(t *testing.T) {
+	client := clientWithTransport(happyPathTransport(
+		t,
+		"TRANSFERID",
+		"d3bf30",
+		"RECIPIENT46HEX",
+		"https://northshoreautomation.wetransfer.com",
+	))
 
-	directURL, filename, err := ResolveDirectLink(
+	directURL, _, err := ResolveDirectLink(
 		context.Background(),
 		client,
-		"https://foo.wetransfer.com/downloads/TRANSFERID/HASH/RID",
+		"https://northshoreautomation.wetransfer.com/downloads/TRANSFERID/RECIPIENT46HEX/d3bf30",
 	)
-
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if directURL != "https://download.example/abc" {
 		t.Errorf("directURL = %q; want https://download.example/abc", directURL)
-	}
-	if filename != "TRANSFERID.zip" {
-		t.Errorf("filename = %q; want TRANSFERID.zip", filename)
 	}
 }
 
 func TestResolveDirectLink_rejectsNonWetransferHost(t *testing.T) {
 	hostile := []string{
 		"https://example.com/downloads/a/b",
-		"https://evilwetransfer.com/downloads/a/b",     // suffix-spoof: must be .wetransfer.com or exact
-		"https://notwetransfer.com/downloads/a/b",      // suffix-spoof variant
-		"https://wetransfer.com.evil.io/downloads/a/b", // double-label suffix
+		"https://evilwetransfer.com/downloads/a/b",
+		"https://notwetransfer.com/downloads/a/b",
+		"https://wetransfer.com.evil.io/downloads/a/b",
 	}
 	for _, u := range hostile {
 		_, _, err := ResolveDirectLink(context.Background(), nil, u)
@@ -163,21 +165,17 @@ func TestResolveDirectLink_rejectsMalformedPath(t *testing.T) {
 		"https://wetransfer.com/downloads/onlyOne",
 		"https://wetransfer.com/wrong/prefix/a/b",
 	}
-	for _, url := range cases {
-		_, _, err := ResolveDirectLink(context.Background(), nil, url)
+	for _, rawURL := range cases {
+		_, _, err := ResolveDirectLink(context.Background(), nil, rawURL)
 		if err == nil {
-			t.Errorf("expected error for URL %q, got nil", url)
+			t.Errorf("expected error for URL %q, got nil", rawURL)
 		}
 	}
 }
 
-func TestResolveDirectLink_missingCSRF(t *testing.T) {
+func TestResolveDirectLink_apiNon200(t *testing.T) {
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Method == http.MethodGet && r.URL.String() == "https://wetransfer.com/" {
-			return makeResponse(http.StatusOK, "<html>no meta tag here</html>"), nil
-		}
-		t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
-		return nil, nil
+		return makeResponse(http.StatusBadRequest, "boom"), nil
 	})
 
 	_, _, err := ResolveDirectLink(
@@ -186,32 +184,10 @@ func TestResolveDirectLink_missingCSRF(t *testing.T) {
 		"https://wetransfer.com/downloads/TID/HASH",
 	)
 	if err == nil {
-		t.Fatal("expected error when CSRF token is missing, got nil")
+		t.Fatal("expected error for 400 POST response, got nil")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "csrf") {
-		t.Errorf("error %q does not mention csrf", err.Error())
-	}
-}
-
-func TestResolveDirectLink_non200FromGet(t *testing.T) {
-	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Method == http.MethodGet && r.URL.String() == "https://wetransfer.com/" {
-			return makeResponse(http.StatusInternalServerError, "boom"), nil
-		}
-		t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
-		return nil, nil
-	})
-
-	_, _, err := ResolveDirectLink(
-		context.Background(),
-		clientWithTransport(rt),
-		"https://wetransfer.com/downloads/TID/HASH",
-	)
-	if err == nil {
-		t.Fatal("expected error for 500 GET response, got nil")
-	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Errorf("error %q does not contain status 500", err.Error())
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error %q does not contain status 400", err.Error())
 	}
 	if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("error %q does not contain body preview", err.Error())
@@ -220,15 +196,7 @@ func TestResolveDirectLink_non200FromGet(t *testing.T) {
 
 func TestResolveDirectLink_emptyDirectLink(t *testing.T) {
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.String() == "https://wetransfer.com/":
-			return makeResponse(http.StatusOK, csrfHTML), nil
-		case r.Method == http.MethodPost:
-			return makeResponse(http.StatusOK, `{"direct_link":""}`), nil
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
-			return nil, nil
-		}
+		return makeResponse(http.StatusOK, `{"direct_link":""}`), nil
 	})
 
 	_, _, err := ResolveDirectLink(
