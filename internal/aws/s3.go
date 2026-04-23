@@ -526,6 +526,19 @@ func (c *Client) UploadObject(ctx context.Context, bucket, key, region string, b
 
 // UploadStream uploads an io.Reader to S3 using multipart upload via manager.Uploader.
 // partSize and concurrency are optional; pass 0 to use manager defaults.
+//
+// The feature/s3/manager package is marked deprecated in favor of
+// feature/s3/transfermanager (discussion aws-sdk-go-v2#3306), but transfermanager
+// is still in preview as of aws-sdk-go-v2 v1.41.x. Revisit once it reaches GA.
+//
+// Orphaned-parts caveat: if ctx is cancelled mid-upload, manager.Uploader tries
+// to call AbortMultipartUpload using the same cancelled ctx, which typically
+// fails. The partial upload then persists in S3 until a bucket-level
+// AbortIncompleteMultipartUpload lifecycle rule reaps it. Configure such a rule
+// on any bucket used as an UploadStream target to avoid accumulating storage
+// cost from cancelled uploads.
+//
+//nolint:staticcheck // manager.Uploader is the current stable multipart API
 func (c *Client) UploadStream(ctx context.Context, bucket, key, region string, body io.Reader, partSize int64, concurrency int) error {
 	uploader := manager.NewUploader(c.S3, func(u *manager.Uploader) {
 		if partSize > 0 {

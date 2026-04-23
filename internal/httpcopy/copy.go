@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -33,14 +34,14 @@ type Progress struct {
 
 // Options configures a single Run invocation.
 type Options struct {
-	URL         string         // WeTransfer share URL or direct HTTP URL
+	URL         string // WeTransfer share URL or direct HTTP URL
 	Bucket      string
-	Key         string        // if empty OR ends with "/", derive filename from response
+	Key         string // if empty OR ends with "/", derive filename from response
 	Region      string
-	PartSize    int64         // bytes; 0 => auto-computed from Content-Length
-	Concurrency int           // 0 => uploader default
+	PartSize    int64          // bytes; 0 => auto-computed from Content-Length
+	Concurrency int            // 0 => uploader default
 	Progress    func(Progress) // nil-safe; called on state changes and data reads
-	HTTPClient  *http.Client  // nil => internal long-timeout client
+	HTTPClient  *http.Client   // nil => internal long-timeout client
 }
 
 // Uploader is the interface satisfied by *aws.Client.  Declaring it here keeps
@@ -97,7 +98,7 @@ func Run(ctx context.Context, up Uploader, opt Options) (key string, err error) 
 		return "", fmt.Errorf("could not parse URL %q: %w", opt.URL, parseErr)
 	}
 
-	if strings.HasSuffix(parsed.Host, "wetransfer.com") {
+	if httpresolve.IsWeTransferHost(parsed.Host) {
 		emit(Progress{Phase: "resolving", BytesTotal: -1})
 
 		resolved, fallback, resolveErr := httpresolve.ResolveDirectLink(ctx, client, opt.URL)
@@ -149,15 +150,15 @@ func Run(ctx context.Context, up Uploader, opt Options) (key string, err error) 
 
 	// Wrap response body with a counting reader for progress callbacks.
 	cr := &countingReader{
-		r:         resp.Body,
-		total:     bytesTotal,
-		key:       key,
+		r:     resp.Body,
+		total: bytesTotal,
+		key:   key,
 		onProgress: func(done int64) {
 			emit(Progress{
-				Phase:     "uploading",
-				BytesDone: done,
+				Phase:      "uploading",
+				BytesDone:  done,
 				BytesTotal: bytesTotal,
-				Filename:  key,
+				Filename:   key,
 			})
 		},
 		enabled: opt.Progress != nil,
@@ -169,10 +170,10 @@ func Run(ctx context.Context, up Uploader, opt Options) (key string, err error) 
 
 	finalDone := cr.done
 	emit(Progress{
-		Phase:     "done",
-		BytesDone: finalDone,
+		Phase:      "done",
+		BytesDone:  finalDone,
 		BytesTotal: finalDone,
-		Filename:  key,
+		Filename:   key,
 	})
 
 	return key, nil
@@ -208,7 +209,11 @@ func deriveKey(optKey, contentDisposition, resolverFilename, directURL string) s
 }
 
 // filenameFromContentDisposition parses a Content-Disposition header value and
-// returns the filename parameter, or an empty string when absent or malformed.
+// returns the filename parameter, sanitized to just the basename — any
+// directory components are stripped to prevent a hostile server from steering
+// the S3 key outside the caller's intended prefix (e.g., filename="../../foo").
+// Returns an empty string when absent, malformed, or when the sanitized result
+// is empty or "." / "..".
 func filenameFromContentDisposition(header string) string {
 	if header == "" {
 		return ""
@@ -217,7 +222,15 @@ func filenameFromContentDisposition(header string) string {
 	if err != nil {
 		return ""
 	}
-	return params["filename"]
+	raw := params["filename"]
+	if raw == "" {
+		return ""
+	}
+	base := path.Base(raw)
+	if base == "" || base == "." || base == ".." || base == "/" {
+		return ""
+	}
+	return base
 }
 
 // lastPathSegment returns the final non-empty path segment of rawURL, or the

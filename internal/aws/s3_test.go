@@ -36,8 +36,8 @@ type mockS3 struct {
 	deleteBucketPolicyErr      error
 
 	// multipart tracking for TestUploadStream
-	createMultipartCalled atomic.Int32
-	uploadPartCalled      atomic.Int32
+	createMultipartCalled   atomic.Int32
+	uploadPartCalled        atomic.Int32
 	completeMultipartBucket string
 	completeMultipartKey    string
 }
@@ -124,11 +124,11 @@ func (m *mockS3) AbortMultipartUpload(ctx context.Context, params *s3.AbortMulti
 
 func TestUploadStream(t *testing.T) {
 	const (
-		bucket    = "test-bucket"
-		key       = "uploads/big-file.bin"
-		region    = "us-west-2"
-		partSize  = 5 * 1024 * 1024 // 5 MiB
-		bodySize  = 6 * 1024 * 1024 // 6 MiB — forces at least two parts
+		bucket   = "test-bucket"
+		key      = "uploads/big-file.bin"
+		region   = "us-west-2"
+		partSize = 5 * 1024 * 1024 // 5 MiB
+		bodySize = 6 * 1024 * 1024 // 6 MiB — forces at least two parts
 	)
 
 	mock := &mockS3{}

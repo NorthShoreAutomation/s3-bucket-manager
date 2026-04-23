@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -61,22 +62,16 @@ func ResolveDirectLink(ctx context.Context, client *http.Client, shareURL string
 // parseWeTransferURL validates the URL and extracts transfer components.
 // recipientID is empty string when the path only has two segments after /downloads/.
 func parseWeTransferURL(rawURL string) (transferID, secHash, recipientID string, err error) {
-	// Parse manually to avoid importing net/url at unnecessary cost — net/url is
-	// already in stdlib and costless, but keep the import lean: use net/url.
-	// Actually net/url is stdlib; use it for correctness.
-	parsed, parseErr := parseURL(rawURL)
-	if parseErr != nil {
+	parsed, parseErr := url.Parse(rawURL)
+	if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", "", "", fmt.Errorf("not a wetransfer share URL: %s", rawURL)
 	}
 
-	host := parsed.host
-	if !strings.HasSuffix(host, "wetransfer.com") {
+	if !isWeTransferHost(parsed.Host) {
 		return "", "", "", fmt.Errorf("not a wetransfer share URL: %s", rawURL)
 	}
 
-	// Path must be /downloads/<transfer_id>/<security_hash>[/<recipient_id>]
-	path := strings.TrimPrefix(parsed.path, "/")
-	segments := strings.Split(path, "/")
+	segments := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
 	if len(segments) < 3 || segments[0] != "downloads" {
 		return "", "", "", fmt.Errorf("not a wetransfer share URL: %s", rawURL)
 	}
@@ -94,27 +89,19 @@ func parseWeTransferURL(rawURL string) (transferID, secHash, recipientID string,
 	return transferID, secHash, recipientID, nil
 }
 
-// urlParts holds just the fields we need, avoiding a full net/url import at
-// package-doc level while still using the stdlib parser internally.
-type urlParts struct {
-	host string
-	path string
+// IsWeTransferHost reports whether host is wetransfer.com or a direct
+// subdomain thereof (e.g., foo.wetransfer.com). It strips any port suffix
+// before comparing. It is exported so callers can gate the resolver without
+// re-implementing the check.
+func IsWeTransferHost(host string) bool {
+	return isWeTransferHost(host)
 }
 
-func parseURL(rawURL string) (urlParts, error) {
-	// Use net/http's url parsing indirectly via http.NewRequest which validates
-	// the URL, but it's simpler to just import net/url directly.
-	// We add the import below.
-	idx := strings.Index(rawURL, "://")
-	if idx < 0 {
-		return urlParts{}, fmt.Errorf("missing scheme")
+func isWeTransferHost(host string) bool {
+	if i := strings.IndexByte(host, ':'); i != -1 {
+		host = host[:i]
 	}
-	rest := rawURL[idx+3:]
-	slash := strings.IndexByte(rest, '/')
-	if slash < 0 {
-		return urlParts{host: rest, path: "/"}, nil
-	}
-	return urlParts{host: rest[:slash], path: rest[slash:]}, nil
+	return host == "wetransfer.com" || strings.HasSuffix(host, ".wetransfer.com")
 }
 
 // fetchCSRF performs GET https://wetransfer.com/ and extracts the CSRF token.

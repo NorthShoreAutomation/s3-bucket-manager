@@ -421,3 +421,50 @@ func TestRun_contextCancel(t *testing.T) {
 		t.Error("uploader should not have been called when context is cancelled")
 	}
 }
+
+// TestRun_sanitizesContentDispositionFilename asserts that a hostile
+// Content-Disposition filename containing path components cannot steer the S3
+// key outside the caller's intended prefix. path.Base must strip any directory
+// component before the filename is appended to opt.Key; bare "." / ".." must
+// fall through to the URL basename.
+func TestRun_sanitizesContentDispositionFilename(t *testing.T) {
+	cases := []struct {
+		name           string
+		headerFilename string
+		wantKey        string
+	}{
+		{"traversal", `attachment; filename="../../../etc/passwd"`, "uploads/passwd"},
+		{"absolute", `attachment; filename="/etc/passwd"`, "uploads/passwd"},
+		{"dotdot_only", `attachment; filename=".."`, "uploads/file.bin"}, // falls through to URL basename
+		{"dot_only", `attachment; filename="."`, "uploads/file.bin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := &fakeUploader{}
+			rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				h := http.Header{}
+				h.Set("Content-Disposition", tc.headerFilename)
+				return makeResponse(http.StatusOK, "x", h), nil
+			})
+			_, err := Run(context.Background(), up, Options{
+				URL:        "https://cdn.example.com/file.bin",
+				Bucket:     "b",
+				Key:        "uploads/",
+				HTTPClient: &http.Client{Transport: rt},
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if up.key != tc.wantKey {
+				t.Errorf("key = %q; want %q", up.key, tc.wantKey)
+			}
+			// Guard: the key must never contain ".." as a path segment, which would
+			// escape the caller's intended prefix when an S3 consumer resolves paths.
+			for _, seg := range strings.Split(up.key, "/") {
+				if seg == ".." {
+					t.Errorf("key %q contains a %q path segment", up.key, "..")
+				}
+			}
+		})
+	}
+}

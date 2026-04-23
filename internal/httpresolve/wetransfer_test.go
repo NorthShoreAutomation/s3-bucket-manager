@@ -126,13 +126,35 @@ func TestResolveDirectLink_withRecipientID(t *testing.T) {
 }
 
 func TestResolveDirectLink_rejectsNonWetransferHost(t *testing.T) {
-	_, _, err := ResolveDirectLink(
-		context.Background(),
-		nil,
+	hostile := []string{
 		"https://example.com/downloads/a/b",
-	)
-	if err == nil {
-		t.Fatal("expected error for non-wetransfer host, got nil")
+		"https://evilwetransfer.com/downloads/a/b",     // suffix-spoof: must be .wetransfer.com or exact
+		"https://notwetransfer.com/downloads/a/b",      // suffix-spoof variant
+		"https://wetransfer.com.evil.io/downloads/a/b", // double-label suffix
+	}
+	for _, u := range hostile {
+		_, _, err := ResolveDirectLink(context.Background(), nil, u)
+		if err == nil {
+			t.Errorf("expected error for host %q, got nil", u)
+		}
+	}
+}
+
+func TestIsWeTransferHost(t *testing.T) {
+	cases := map[string]bool{
+		"wetransfer.com":                      true,
+		"foo.wetransfer.com":                  true,
+		"northshoreautomation.wetransfer.com": true,
+		"wetransfer.com:443":                  true,
+		"evilwetransfer.com":                  false,
+		"wetransfer.com.evil.io":              false,
+		"notwetransfer.com":                   false,
+		"":                                    false,
+	}
+	for host, want := range cases {
+		if got := IsWeTransferHost(host); got != want {
+			t.Errorf("IsWeTransferHost(%q) = %v; want %v", host, got, want)
+		}
 	}
 }
 
