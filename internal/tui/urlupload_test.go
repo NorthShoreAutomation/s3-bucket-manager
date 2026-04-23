@@ -84,6 +84,26 @@ func TestURLUploadTabSwitchesActiveInput(t *testing.T) {
 	}
 }
 
+// TestURLUploadStatusLineUsesCurrentRate verifies the status line renders the
+// cached tick rate and derived ETA, rather than recomputing from zero deltas at
+// view time.
+func TestURLUploadStatusLineUsesCurrentRate(t *testing.T) {
+	m := newURLUpload(nil, "my-bucket", "us-east-1", "")
+	m.currentRate = 2 * (1 << 20) // 2.0 MB/s
+
+	line := m.statusLine(&progressSnapshot{
+		done:  4 * (1 << 20),
+		total: 10 * (1 << 20),
+	})
+
+	if !strings.Contains(line, "2.0 MB/s") {
+		t.Fatalf("expected rendered rate in status line, got: %s", line)
+	}
+	if !strings.Contains(line, "ETA 3s") {
+		t.Fatalf("expected ETA in status line, got: %s", line)
+	}
+}
+
 // TestFormatRate covers the formatRate helper.
 func TestFormatRate(t *testing.T) {
 	cases := []struct {
@@ -102,6 +122,30 @@ func TestFormatRate(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("formatRate(%v) = %q, want %q", tc.bps, got, tc.want)
 		}
+	}
+}
+
+func TestAppCtrlCCancelsURLUploadInsteadOfQuitting(t *testing.T) {
+	app := NewApp(nil)
+	cancelled := false
+	app.buckets.urlUpload = &urlUploadModel{
+		phase:  urlUploadPhaseProgress,
+		cancel: func() { cancelled = true },
+	}
+
+	model, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated, ok := model.(App)
+	if !ok {
+		t.Fatalf("expected App model, got %T", model)
+	}
+	if !cancelled {
+		t.Fatal("expected ctrl+c to trigger upload cancellation")
+	}
+	if cmd != nil {
+		t.Fatalf("expected no quit command while URL upload is active, got %v", cmd)
+	}
+	if updated.buckets.urlUpload == nil {
+		t.Fatal("expected URL upload modal to remain active until cancellation result arrives")
 	}
 }
 

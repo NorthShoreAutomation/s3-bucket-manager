@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -80,8 +81,9 @@ type urlUploadModel struct {
 	snap    *sharedSnap // shared with the goroutine
 
 	// Rate tracking (updated on each tick)
-	lastDone int64
-	lastTime time.Time
+	lastDone    int64
+	lastTime    time.Time
+	currentRate float64
 
 	// Cached last-seen snapshot for View()
 	lastSnap *progressSnapshot
@@ -207,6 +209,9 @@ func (m urlUploadModel) updateInput(msg tea.Msg) (urlUploadModel, tea.Cmd) {
 				})
 				cancel()
 				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return urlUploadErrMsg{Err: fmt.Errorf("cancelled")}
+					}
 					return urlUploadErrMsg{Err: err}
 				}
 				snap := shared.ptr.Load()
@@ -263,20 +268,14 @@ func (m urlUploadModel) updateProgress(msg tea.Msg) (urlUploadModel, tea.Cmd) {
 		}
 		snap := m.snap.ptr.Load()
 		if snap != nil {
-			// Compute rate from delta since the last tick.
 			now := time.Now()
 			elapsed := now.Sub(m.lastTime).Seconds()
-			if elapsed > 0.01 && snap.done > m.lastDone {
-				snap = &progressSnapshot{
-					done:  snap.done,
-					total: snap.total,
-					phase: snap.phase,
-					key:   snap.key,
-				}
-				// We intentionally don't mutate the shared snapshot; rate is local.
+			delta := snap.done - m.lastDone
+			if elapsed > 0.01 && delta > 0 {
+				m.currentRate = float64(delta) / elapsed
 			}
 			m.lastDone = snap.done
-			m.lastTime = time.Now()
+			m.lastTime = now
 			m.lastSnap = snap
 
 			// Advance the progress bar when total is known.
@@ -366,20 +365,7 @@ func (m urlUploadModel) viewProgress() string {
 // When total is unknown: "<done> — <rate>"
 func (m urlUploadModel) statusLine(snap *progressSnapshot) string {
 	done := formatSize(snap.done)
-	// Compute rate from tick-level delta stored on the model (not from snapshot
-	// directly, because the snapshot rate is last-callback delta which can be noisy).
-	rate := ""
-	if m.lastTime.IsZero() || m.lastDone == 0 {
-		rate = "—/s"
-	} else {
-		elapsed := time.Since(m.lastTime).Seconds()
-		delta := float64(snap.done - m.lastDone)
-		if elapsed > 0 && delta > 0 {
-			rate = formatRate(delta / elapsed)
-		} else {
-			rate = "—/s"
-		}
-	}
+	rate := formatRate(m.currentRate)
 
 	if snap.total <= 0 {
 		return dimStyle.Render(fmt.Sprintf("%s — %s", done, rate))
