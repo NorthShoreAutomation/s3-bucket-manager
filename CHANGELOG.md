@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- HTTP-to-S3 streaming copy — upload a remote file (including WeTransfer share links) straight into S3 via multipart upload without a local disk round-trip
+  - CLI: `s3m http-copy <url> s3://<bucket>/<key-or-prefix>/` with `--part-size` and `--concurrency` flags
+  - TUI: `[U]` keybinding in the S3 file browser opens a URL upload modal with live progress bar, rate, and ETA
+  - WeTransfer share links are auto-resolved to their direct download URL before streaming
+  - Part size is auto-computed from `Content-Length` to stay under S3's 10,000-part cap (supports files up to 5 TiB)
+
 ## [0.5.0] - 2026-04-12
 ### Added
 - add file download (g) and upload (p) to S3 browser (#7)
