@@ -13,6 +13,7 @@ import (
 	"github.com/aws/smithy-go"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -517,6 +518,34 @@ func (c *Client) UploadObject(ctx context.Context, bucket, key, region string, b
 		Key:    aws.String(key),
 		Body:   body,
 	}, opts)
+	if err != nil {
+		return fmt.Errorf("could not upload %q: %w", key, err)
+	}
+	return nil
+}
+
+// UploadStream uploads an io.Reader to S3 using multipart upload via manager.Uploader.
+// partSize and concurrency are optional; pass 0 to use manager defaults.
+func (c *Client) UploadStream(ctx context.Context, bucket, key, region string, body io.Reader, partSize int64, concurrency int) error {
+	uploader := manager.NewUploader(c.S3, func(u *manager.Uploader) {
+		if partSize > 0 {
+			u.PartSize = partSize
+		}
+		if concurrency > 0 {
+			u.Concurrency = concurrency
+		}
+	})
+	var uploadOpts []func(*manager.Uploader)
+	if region != "" {
+		uploadOpts = append(uploadOpts, manager.WithUploaderRequestOptions(func(o *s3.Options) {
+			o.Region = region
+		}))
+	}
+	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   body,
+	}, uploadOpts...)
 	if err != nil {
 		return fmt.Errorf("could not upload %q: %w", key, err)
 	}

@@ -1,7 +1,9 @@
 package aws
 
 import (
+	"bytes"
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +34,12 @@ type mockS3 struct {
 	getBucketPolicyErr         error
 	putBucketPolicyErr         error
 	deleteBucketPolicyErr      error
+
+	// multipart tracking for TestUploadStream
+	createMultipartCalled atomic.Int32
+	uploadPartCalled      atomic.Int32
+	completeMultipartBucket string
+	completeMultipartKey    string
 }
 
 func (m *mockS3) ListBuckets(ctx context.Context, params *s3.ListBucketsInput, optFns ...func(*s3.Options)) (*s3.ListBucketsOutput, error) {
@@ -84,6 +92,66 @@ func (m *mockS3) DeleteBucketPolicy(ctx context.Context, params *s3.DeleteBucket
 
 func (m *mockS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
 	return &s3.GetObjectOutput{}, nil
+}
+
+func (m *mockS3) CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	m.createMultipartCalled.Add(1)
+	return &s3.CreateMultipartUploadOutput{
+		Bucket:   params.Bucket,
+		Key:      params.Key,
+		UploadId: aws.String("test-upload-id"),
+	}, nil
+}
+
+func (m *mockS3) UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	m.uploadPartCalled.Add(1)
+	return &s3.UploadPartOutput{ETag: aws.String("etag")}, nil
+}
+
+func (m *mockS3) CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	if params.Bucket != nil {
+		m.completeMultipartBucket = *params.Bucket
+	}
+	if params.Key != nil {
+		m.completeMultipartKey = *params.Key
+	}
+	return &s3.CompleteMultipartUploadOutput{}, nil
+}
+
+func (m *mockS3) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
+func TestUploadStream(t *testing.T) {
+	const (
+		bucket    = "test-bucket"
+		key       = "uploads/big-file.bin"
+		region    = "us-west-2"
+		partSize  = 5 * 1024 * 1024 // 5 MiB
+		bodySize  = 6 * 1024 * 1024 // 6 MiB — forces at least two parts
+	)
+
+	mock := &mockS3{}
+	client := &Client{S3: mock, Region: "us-east-1"}
+
+	body := bytes.NewReader(make([]byte, bodySize))
+	err := client.UploadStream(context.Background(), bucket, key, region, body, partSize, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if mock.createMultipartCalled.Load() != 1 {
+		t.Errorf("expected CreateMultipartUpload to be called once, got %d", mock.createMultipartCalled.Load())
+	}
+	if mock.uploadPartCalled.Load() < 2 {
+		t.Errorf("expected at least 2 UploadPart calls for 6 MiB body with 5 MiB part size, got %d", mock.uploadPartCalled.Load())
+	}
+	if mock.completeMultipartBucket != bucket {
+		t.Errorf("expected CompleteMultipartUpload bucket %q, got %q", bucket, mock.completeMultipartBucket)
+	}
+	if mock.completeMultipartKey != key {
+		t.Errorf("expected CompleteMultipartUpload key %q, got %q", key, mock.completeMultipartKey)
+	}
 }
 
 func TestListBuckets(t *testing.T) {
