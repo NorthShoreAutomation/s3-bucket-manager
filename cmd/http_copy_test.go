@@ -169,14 +169,10 @@ func TestHTTPCopyCmd_rejectsBadArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := newTestRoot()
 			var errBuf bytes.Buffer
+			root.SetArgs(tc.args)
 			root.SetErr(&errBuf)
 
 			err := root.Execute()
-			// We set args on root directly via os.Args simulation — use SetArgs.
-			root2 := newTestRoot()
-			root2.SetArgs(tc.args)
-			root2.SetErr(&errBuf)
-			err = root2.Execute()
 
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tc.wantErrStr)
