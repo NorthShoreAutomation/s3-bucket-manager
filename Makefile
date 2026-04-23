@@ -7,10 +7,14 @@ VERSION   := $(shell git describe --tags --always --dirty 2>/dev/null || echo "d
 COMMIT    := $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 LDFLAGS   := -X $(MODULE)/internal/buildinfo.Version=$(VERSION) -X $(MODULE)/internal/buildinfo.Commit=$(COMMIT) -X $(MODULE)/internal/buildinfo.Date=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
-.PHONY: build install uninstall test vet lint fmt clean run help
+.PHONY: build build-linux-amd64 install uninstall test vet lint fmt clean run help
 
-build: ## Build the binary
+build: ## Build the binary for the host platform
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) .
+
+build-linux-amd64: ## Cross-compile static binary for linux/amd64
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-linux-amd64 .
 
 install: build ## Build and install to ~/.local/bin
 	@mkdir -p $(INSTALL_DIR)
