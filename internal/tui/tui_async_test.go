@@ -137,6 +137,52 @@ func TestBucketDetailShowsLoadErrorInsteadOfEmptyState(t *testing.T) {
 	}
 }
 
+func TestBucketsRendersFriendlyIAMAccessDeniedMessage(t *testing.T) {
+	// When credentials cannot call iam:ListUsers (common for bucket-scoped keys),
+	// the raw AWS error must be translated to a friendly notice so the bucket
+	// detail view stays usable.
+	m := bucketsModel{
+		items: []bucketItem{{name: "bucket-a", region: "us-west-2"}},
+		mode:  bucketDetail,
+	}
+	m.bucketUsersLoading = true
+
+	updated, _ := m.update(bucketUsersLoadedMsg{
+		bucket: "bucket-a",
+		err:    awsClient.ErrIAMAccessDenied,
+	})
+
+	if updated.bucketUsersLoading {
+		t.Fatal("expected loading state to clear on error")
+	}
+	if !strings.Contains(updated.bucketUsersError, "IAM access denied") {
+		t.Fatalf("expected friendly IAM-access-denied message, got %q", updated.bucketUsersError)
+	}
+	if strings.Contains(updated.bucketUsersError, "ListUsers") {
+		t.Fatalf("friendly message should hide raw API call name, got %q", updated.bucketUsersError)
+	}
+}
+
+func TestBucketsRendersRawErrorForUnrelatedFailures(t *testing.T) {
+	// Non-IAM errors (throttling, network, etc.) should still bubble up as-is so
+	// operators can diagnose real failures — only AccessDenied on iam:ListUsers
+	// gets the friendly substitution.
+	m := bucketsModel{
+		items: []bucketItem{{name: "bucket-a", region: "us-west-2"}},
+		mode:  bucketDetail,
+	}
+	m.bucketUsersLoading = true
+
+	updated, _ := m.update(bucketUsersLoadedMsg{
+		bucket: "bucket-a",
+		err:    errors.New("throttled: rate exceeded"),
+	})
+
+	if !strings.Contains(updated.bucketUsersError, "throttled") {
+		t.Fatalf("expected raw error text to be preserved, got %q", updated.bucketUsersError)
+	}
+}
+
 func TestNewAppForBucketStartsUserAccessLoading(t *testing.T) {
 	app := NewAppForBucket(context.Background(), &awsClient.Client{
 		Region: "us-west-2",
