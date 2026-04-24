@@ -66,7 +66,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Global keys
 		switch msg.String() {
 		case "ctrl+c":
-			return a, tea.Quit
+			if a.buckets.urlUpload == nil {
+				return a, tea.Quit
+			}
 		case "q":
 			// Quit from any screen, unless user is typing in a text input
 			if !a.isTextInputActive() {
@@ -132,6 +134,7 @@ func (a App) viewHelp() string {
 	s += "  d       Delete selected item\n"
 	s += "  g       Download selected file\n"
 	s += "  p       Upload file to current folder\n"
+	s += "  U       Upload to S3 from a URL or WeTransfer link\n"
 	s += "  enter   Select / drill in\n"
 	s += "  pgup    Page up in lists\n"
 	s += "  pgdn    Page down in lists\n"
@@ -153,6 +156,7 @@ func (a App) isTextInputActive() bool {
 		a.buckets.mode == bucketDetailPickUser ||
 		a.buckets.mode == bucketDetailPickPerm ||
 		a.buckets.mode == bucketDetailConfirmRemoveUser ||
+		a.buckets.urlUpload != nil ||
 		a.users.mode == usersCreate
 }
 
