@@ -99,6 +99,9 @@ type bucketsModel struct {
 	// File picker fields
 	filePicker     filePickerModel
 	showFilePicker bool
+
+	// URL upload sub-model (non-nil while active)
+	urlUpload *urlUploadModel
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -189,6 +192,20 @@ func userPermsToItems(users []model.UserPermission) []bucketUserItem {
 }
 
 func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
+	// Delegate all messages to the URL upload sub-model while it is active.
+	// urlUploadDoneMsg / urlUploadErrMsg fall through so the cases below can
+	// clean up m.urlUpload and refresh the browse listing.
+	if m.urlUpload != nil {
+		switch msg.(type) {
+		case urlUploadDoneMsg, urlUploadErrMsg:
+			// handled below — fall through
+		default:
+			updated, cmd := m.urlUpload.Update(msg)
+			m.urlUpload = &updated
+			return m, cmd
+		}
+	}
+
 	switch msg := msg.(type) {
 	case errMsg:
 		m.loading = false
@@ -338,6 +355,21 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.deleteProgress = ""
 		// Reload the browse view to show the new file
 		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+
+	case urlUploadDoneMsg:
+		m.urlUpload = nil
+		m.detailMessage = fmt.Sprintf("Uploaded %s (%s)", msg.Key, formatSize(msg.Bytes))
+		// Reload the browse view to show the new file
+		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+
+	case urlUploadErrMsg:
+		m.urlUpload = nil
+		if strings.Contains(msg.Err.Error(), "cancelled") {
+			m.detailMessage = "URL upload cancelled"
+		} else {
+			m.detailMessage = "URL upload failed: " + msg.Err.Error()
+		}
+		return m, nil
 
 	case spinner.TickMsg:
 		if m.loading {
@@ -1273,6 +1305,13 @@ func (m bucketsModel) viewDetail() string {
 
 	s += "\n"
 
+	// When URL upload modal is active, render it instead of the browse/prefix view
+	if m.urlUpload != nil {
+		m.urlUpload.width = m.width
+		s += m.urlUpload.View()
+		return s
+	}
+
 	// When file picker is active, render it instead of the browse/prefix view
 	if m.showFilePicker {
 		s += m.filePicker.view(detailWidth)
@@ -1354,7 +1393,7 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [g] Download  [p] Upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
+		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
 	} else {
 		// Prefix list
 		if len(m.prefixes) > 0 {
@@ -1685,6 +1724,13 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.filePicker = fp
 		m.showFilePicker = true
 		return m, nil
+	case "U":
+		// Open URL upload modal
+		bucket := m.items[m.cursor]
+		um := newURLUpload(m.client, bucket.name, bucket.region, m.browsePrefix)
+		um.width = m.width
+		m.urlUpload = &um
+		return m, m.urlUpload.Init()
 	case "r":
 		m.loading = true
 		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())

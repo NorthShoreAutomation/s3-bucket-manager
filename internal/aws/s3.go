@@ -13,6 +13,7 @@ import (
 	"github.com/aws/smithy-go"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -517,6 +518,47 @@ func (c *Client) UploadObject(ctx context.Context, bucket, key, region string, b
 		Key:    aws.String(key),
 		Body:   body,
 	}, opts)
+	if err != nil {
+		return fmt.Errorf("could not upload %q: %w", key, err)
+	}
+	return nil
+}
+
+// UploadStream uploads an io.Reader to S3 using multipart upload via manager.Uploader.
+// partSize and concurrency are optional; pass 0 to use manager defaults.
+//
+// The feature/s3/manager package is marked deprecated in favor of
+// feature/s3/transfermanager (discussion aws-sdk-go-v2#3306), but transfermanager
+// is still in preview as of aws-sdk-go-v2 v1.41.x. Revisit once it reaches GA.
+//
+// Orphaned-parts caveat: if ctx is cancelled mid-upload, manager.Uploader tries
+// to call AbortMultipartUpload using the same cancelled ctx, which typically
+// fails. The partial upload then persists in S3 until a bucket-level
+// AbortIncompleteMultipartUpload lifecycle rule reaps it. Configure such a rule
+// on any bucket used as an UploadStream target to avoid accumulating storage
+// cost from cancelled uploads.
+//
+//nolint:staticcheck // manager.Uploader is the current stable multipart API
+func (c *Client) UploadStream(ctx context.Context, bucket, key, region string, body io.Reader, partSize int64, concurrency int) error {
+	uploader := manager.NewUploader(c.S3, func(u *manager.Uploader) {
+		if partSize > 0 {
+			u.PartSize = partSize
+		}
+		if concurrency > 0 {
+			u.Concurrency = concurrency
+		}
+	})
+	var uploadOpts []func(*manager.Uploader)
+	if region != "" {
+		uploadOpts = append(uploadOpts, manager.WithUploaderRequestOptions(func(o *s3.Options) {
+			o.Region = region
+		}))
+	}
+	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   body,
+	}, uploadOpts...)
 	if err != nil {
 		return fmt.Errorf("could not upload %q: %w", key, err)
 	}

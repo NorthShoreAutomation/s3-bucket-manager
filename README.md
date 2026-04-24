@@ -38,6 +38,7 @@ s3m --region us-west-2 # Override region
 - `b` Buckets, `u` Users, `a` Access control
 - `c` Create, `d` Delete, `r` Rotate key
 - `Enter` Select/drill in, `Esc` Go back
+- In the file browser: `p` upload from disk, `g` download, `U` upload from URL
 - `?` Help, `q` Quit
 
 ### CLI Mode
@@ -59,7 +60,21 @@ s3m access show my-bucket
 s3m access set my-bucket --prefix installers/ --public --yes
 s3m access set my-bucket --prefix data/ --private
 s3m access set my-bucket --public  # Whole bucket
+
+# HTTP to S3 streaming copy
+s3m http-copy 'https://example.com/big.zip' s3://my-bucket/inbox/
+s3m http-copy 'https://foo.wetransfer.com/downloads/<id>/<hash>' s3://my-bucket/inbox/
+s3m http-copy 'https://example.com/big.zip' s3://my-bucket/exact/key.zip --part-size 256MiB
 ```
+
+`http-copy` streams the response body straight into S3 via multipart upload —
+no local disk buffering. When the URL host matches `wetransfer.com`, the share
+link is first resolved to its direct CloudFront download URL.
+
+Part size is auto-computed from `Content-Length` to stay under S3's 10,000-part
+cap (files up to ~700 GB need ≥70 MiB parts). Override with `--part-size` if
+the source omits `Content-Length`. Memory cost is roughly `partSize × concurrency`
+(default concurrency 5), so 128 MiB parts use ~640 MiB RAM.
 
 **Flags:**
 - `--profile` AWS profile name
