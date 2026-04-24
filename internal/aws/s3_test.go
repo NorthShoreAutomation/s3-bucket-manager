@@ -58,6 +58,10 @@ func (m *mockS3) GetBucketLocation(ctx context.Context, params *s3.GetBucketLoca
 	return m.getBucketLocationOutput, nil
 }
 
+func (m *mockS3) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	return &s3.HeadBucketOutput{}, nil
+}
+
 func (m *mockS3) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	return &s3.PutObjectOutput{}, m.putObjectErr
 }
@@ -159,8 +163,8 @@ func TestListBuckets(t *testing.T) {
 	mock := &mockS3{
 		listBucketsOutput: &s3.ListBucketsOutput{
 			Buckets: []s3types.Bucket{
-				{Name: aws.String("my-bucket"), CreationDate: &now},
-				{Name: aws.String("other-bucket"), CreationDate: &now},
+				{Name: aws.String("my-bucket"), CreationDate: &now, BucketRegion: aws.String("us-west-2")},
+				{Name: aws.String("other-bucket"), CreationDate: &now, BucketRegion: aws.String("us-west-2")},
 			},
 		},
 		getBucketLocationOutput: &s3.GetBucketLocationOutput{

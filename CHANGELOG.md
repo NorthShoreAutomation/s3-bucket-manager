@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- Region auto-detection removes the need to pass `--region` manually when a bucket lives in a non-default region. `ListBuckets` now reads the region directly from the S3 API response, and `--bucket <name>` resolves the bucket region via `HeadBucket`, which works with bucket-scoped credentials that lack `s3:GetBucketLocation`. Eliminates the `PermanentRedirect` / HTTP 301 errors on cross-region buckets (e.g. `ListObjectsV2` failures).
+- Bucket detail view no longer blocks on IAM `ListUsers` 403 errors. When credentials cannot list IAM users (common for bucket-scoped keys), the user-access panel shows "IAM access denied — cannot list managed users with these credentials" instead of a raw AWS error.
+
 ### Added
 - `--bucket <name>` CLI flag: opens the TUI directly inside the given bucket, skipping the bucket list. Enables use with credentials that lack `s3:ListAllMyBuckets`. Esc from the bucket view quits when launched this way.
 

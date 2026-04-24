@@ -23,7 +23,10 @@ import (
 )
 
 // ListBuckets returns all S3 buckets with their region and public status.
-// Per-bucket metadata is fetched concurrently for speed.
+// Region comes directly from the ListBuckets response when the SDK/API populates
+// the BucketRegion field — no extra per-bucket call needed. When the field is
+// empty (old buckets or older API behavior), fall back to a HeadBucket-based
+// lookup so users never need to supply --region manually.
 func (c *Client) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
 	output, err := c.S3.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
@@ -36,27 +39,21 @@ func (c *Client) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
 		buckets[i] = model.Bucket{
 			Name:         aws.ToString(b.Name),
 			CreationDate: aws.ToTime(b.CreationDate),
+			Region:       aws.ToString(b.BucketRegion),
 		}
 		wg.Add(1)
-		go func(idx int, name string) {
+		go func(idx int, name string, region string) {
 			defer wg.Done()
 
-			// Get region
-			locOutput, err := c.S3.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
-				Bucket: aws.String(name),
-			})
-			if err == nil {
-				region := string(locOutput.LocationConstraint)
-				if region == "" {
-					region = "us-east-1"
+			if region == "" {
+				if resolved, regionErr := c.GetBucketRegion(ctx, name); regionErr == nil {
+					buckets[idx].Region = resolved
 				}
-				buckets[idx].Region = region
 			}
 
-			// Check public access
 			pabOutput, err := c.S3.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
 				Bucket: aws.String(name),
-			})
+			}, withBucketRegion(buckets[idx].Region))
 			if err != nil {
 				buckets[idx].IsPublic = true
 			} else {
@@ -67,10 +64,20 @@ func (c *Client) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
 					aws.ToBool(cfg.RestrictPublicBuckets)
 				buckets[idx].IsPublic = !allBlocked
 			}
-		}(i, aws.ToString(b.Name))
+		}(i, aws.ToString(b.Name), aws.ToString(b.BucketRegion))
 	}
 	wg.Wait()
 	return buckets, nil
+}
+
+// withBucketRegion returns an s3 option that pins the request to the bucket's
+// region, avoiding 301 PermanentRedirect when the client default region differs.
+func withBucketRegion(region string) func(*s3.Options) {
+	return func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
 }
 
 // CreateBucket creates an S3 bucket with public access blocked by default.
@@ -362,20 +369,32 @@ func (c *Client) GetBucketObjectCount(ctx context.Context, bucket, region string
 	return stats.ObjectCount, err
 }
 
-// GetBucketRegion returns the bucket's actual region.
+// GetBucketRegion returns the bucket's actual region using a HeadBucket-based
+// lookup that works cross-region and with credentials that lack
+// s3:GetBucketLocation (e.g. bucket-scoped access keys). Falls back to
+// GetBucketLocation only if HeadBucket yields no region header.
 func (c *Client) GetBucketRegion(ctx context.Context, bucket string) (string, error) {
-	output, err := c.S3.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
+	region, err := manager.GetBucketRegion(ctx, c.S3, bucket)
+	if err == nil && region != "" {
+		return region, nil
+	}
+
+	// Fallback: some edge cases (anonymous-blocked buckets, proxies) hide the
+	// x-amz-bucket-region header. Try GetBucketLocation as a best-effort.
+	if locOutput, locErr := c.S3.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
 		Bucket: aws.String(bucket),
-	})
+	}); locErr == nil {
+		r := string(locOutput.LocationConstraint)
+		if r == "" {
+			r = "us-east-1"
+		}
+		return r, nil
+	}
+
 	if err != nil {
 		return "", fmt.Errorf("could not get region for %q: %w", bucket, err)
 	}
-
-	region := string(output.LocationConstraint)
-	if region == "" {
-		region = "us-east-1"
-	}
-	return region, nil
+	return "", fmt.Errorf("could not get region for %q", bucket)
 }
 
 // ListPrefixes returns top-level prefixes (folders) in a bucket.

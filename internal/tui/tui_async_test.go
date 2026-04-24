@@ -24,6 +24,14 @@ func (s *stubS3ForBucketInit) GetBucketLocation(ctx context.Context, params *s3.
 	}, nil
 }
 
+// HeadBucket is stubbed to return an empty response. The manager-based
+// GetBucketRegion helper reads the bucket region from raw HTTP headers via
+// middleware that only runs against real SDK clients, so in-process tests
+// rely on the GetBucketLocation fallback path in Client.GetBucketRegion.
+func (s *stubS3ForBucketInit) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	return &s3.HeadBucketOutput{}, nil
+}
+
 func TestAppUpdateRoutesErrMsgToActiveModel(t *testing.T) {
 	app := App{
 		screen: screenUsers,

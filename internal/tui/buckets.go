@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -302,7 +303,11 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		}
 		m.bucketUsersError = ""
 		if msg.err != nil {
-			m.bucketUsersError = msg.err.Error()
+			if errors.Is(msg.err, awsClient.ErrIAMAccessDenied) {
+				m.bucketUsersError = "IAM access denied — cannot list managed users with these credentials"
+			} else {
+				m.bucketUsersError = msg.err.Error()
+			}
 			m.bucketUsers = nil
 			m.bucketUsersLoading = false
 			return m, nil
