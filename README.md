@@ -29,9 +29,11 @@ go build -o bin/s3m .
 Launch the interactive dashboard:
 
 ```bash
-s3m                    # Uses default AWS profile
-s3m --profile work     # Uses named profile
-s3m --region us-west-2 # Override region
+s3m                      # Uses default AWS profile
+s3m --profile work       # Uses named profile
+s3m --region us-west-2   # Override region
+s3m --bucket my-bucket   # Open directly inside bucket (skips bucket list;
+                         # use when credentials lack s3:ListAllMyBuckets)
 ```
 
 **Keyboard shortcuts:**
@@ -64,6 +66,7 @@ s3m access set my-bucket --public  # Whole bucket
 **Flags:**
 - `--profile` AWS profile name
 - `--region` AWS region
+- `--bucket` Open TUI directly inside the given bucket (skips bucket list)
 - `--json` Machine-readable JSON output
 - `--yes` Skip confirmation prompts (for scripting)
 

@@ -44,6 +44,9 @@ func NewApp(client *awsClient.Client) App {
 }
 
 func (a App) Init() tea.Cmd {
+	if a.buckets.directBucket {
+		return tea.Batch(a.buckets.spinner.Tick, a.buckets.loadPrefixes(), a.buckets.loadBucketUsers())
+	}
 	return a.buckets.init()
 }
 
@@ -301,16 +304,44 @@ type bucketAccessUpdatedMsg struct {
 var prog *tea.Program
 
 // Run starts the TUI.
-func Run(profile, region string) error {
+func Run(profile, region, bucket string) error {
 	ctx := context.Background()
 	client, err := awsClient.NewClient(ctx, profile, region)
 	if err != nil {
 		return err
 	}
 
-	app := NewApp(client)
+	var app App
+	if bucket != "" {
+		app = NewAppForBucket(ctx, client, bucket)
+	} else {
+		app = NewApp(client)
+	}
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	prog = p
 	_, err = p.Run()
 	return err
+}
+
+// NewAppForBucket creates an App pre-seeded with a single bucket and opens
+// directly in bucket detail mode. Used when credentials cannot list buckets.
+func NewAppForBucket(ctx context.Context, client *awsClient.Client, bucket string) App {
+	// Best-effort region resolution. If GetBucketLocation is denied, fall
+	// back to the client's configured region.
+	bucketRegion, err := client.GetBucketRegion(ctx, bucket)
+	if err != nil || bucketRegion == "" {
+		bucketRegion = client.Region
+	}
+	b := newBucketsModel(client)
+	b.items = []bucketItem{{name: bucket, region: bucketRegion}}
+	b.cursor = 0
+	b.mode = bucketDetail
+	b.loading = true
+	b.directBucket = true
+	return App{
+		client:  client,
+		screen:  screenBucketDetail,
+		buckets: b,
+		users:   newUsersModel(client),
+	}
 }

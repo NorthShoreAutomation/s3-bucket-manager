@@ -99,6 +99,10 @@ type bucketsModel struct {
 	// File picker fields
 	filePicker     filePickerModel
 	showFilePicker bool
+
+	// directBucket is true when the app was launched with --bucket, so the
+	// bucket list is unreachable and esc from the detail view should quit.
+	directBucket bool
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -740,6 +744,9 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.bucketUsersError = ""
 		return m, tea.Batch(m.spinner.Tick, m.loadPrefixes(), m.loadBucketUsers())
 	case "left", "h", "esc":
+		if m.directBucket {
+			return m, tea.Quit
+		}
 		m.mode = bucketsList
 		m.detailMessage = ""
 		m.prefixes = nil
