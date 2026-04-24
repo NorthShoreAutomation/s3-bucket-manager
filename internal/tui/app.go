@@ -45,7 +45,12 @@ func NewApp(client *awsClient.Client) App {
 
 func (a App) Init() tea.Cmd {
 	if a.buckets.directBucket {
-		return tea.Batch(a.buckets.spinner.Tick, a.buckets.loadPrefixes(), a.buckets.loadBucketUsers())
+		return tea.Batch(
+			a.buckets.spinner.Tick,
+			a.buckets.loadDirectBucketMetadata(),
+			a.buckets.loadPrefixes(),
+			a.buckets.loadBucketUsers(),
+		)
 	}
 	return a.buckets.init()
 }
@@ -304,6 +309,10 @@ type bucketAccessUpdatedMsg struct {
 	users   []model.UserPermission
 }
 
+type directBucketMetadataLoadedMsg struct {
+	bucket bucketItem
+}
+
 // prog holds the running tea.Program so goroutines can send progress messages.
 var prog *tea.Program
 
@@ -341,6 +350,7 @@ func NewAppForBucket(ctx context.Context, client *awsClient.Client, bucket strin
 	b.cursor = 0
 	b.mode = bucketDetail
 	b.loading = true
+	b.bucketUsersLoading = true
 	b.directBucket = true
 	return App{
 		client:  client,

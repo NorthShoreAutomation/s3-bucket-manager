@@ -1,12 +1,28 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	awsClient "github.com/dcorbell/s3m/internal/aws"
 	"github.com/dcorbell/s3m/internal/model"
 )
+
+type stubS3ForBucketInit struct {
+	awsClient.S3API
+	region string
+}
+
+func (s *stubS3ForBucketInit) GetBucketLocation(ctx context.Context, params *s3.GetBucketLocationInput, optFns ...func(*s3.Options)) (*s3.GetBucketLocationOutput, error) {
+	return &s3.GetBucketLocationOutput{
+		LocationConstraint: s3types.BucketLocationConstraint(s.region),
+	}, nil
+}
 
 func TestAppUpdateRoutesErrMsgToActiveModel(t *testing.T) {
 	app := App{
@@ -110,5 +126,51 @@ func TestBucketDetailShowsLoadErrorInsteadOfEmptyState(t *testing.T) {
 	}
 	if strings.Contains(view, "No users assigned.") {
 		t.Fatalf("expected error state to replace empty-state copy, got %q", view)
+	}
+}
+
+func TestNewAppForBucketStartsUserAccessLoading(t *testing.T) {
+	app := NewAppForBucket(context.Background(), &awsClient.Client{
+		Region: "us-west-2",
+		S3:     &stubS3ForBucketInit{region: "us-west-2"},
+	}, "bucket-a")
+
+	if !app.buckets.bucketUsersLoading {
+		t.Fatal("expected direct bucket mode to mark user access as loading")
+	}
+}
+
+func TestDirectBucketDetailKeepsLoadingStateUntilUsersArrive(t *testing.T) {
+	app := NewAppForBucket(context.Background(), &awsClient.Client{
+		Region: "us-west-2",
+		S3:     &stubS3ForBucketInit{region: "us-west-2"},
+	}, "bucket-a")
+
+	updated, _ := app.buckets.update(prefixesLoadedMsg{
+		bucket: "bucket-a",
+		prefixes: []prefixItem{
+			{prefix: "installers/"},
+		},
+	})
+	view := updated.viewDetail()
+
+	if !strings.Contains(view, "Loading user access...") {
+		t.Fatalf("expected direct bucket detail to keep user access in loading state, got %q", view)
+	}
+	if strings.Contains(view, "No users assigned.") {
+		t.Fatalf("expected loading state instead of empty-state copy, got %q", view)
+	}
+}
+
+func TestBucketDetailShowsUnknownCreatedWhenUnavailable(t *testing.T) {
+	m := bucketsModel{
+		items: []bucketItem{{name: "bucket-a", region: "us-west-2"}},
+		mode:  bucketDetail,
+	}
+
+	view := m.viewDetail()
+
+	if !strings.Contains(view, "Unknown") {
+		t.Fatalf("expected detail view to label missing created date as unknown, got %q", view)
 	}
 }

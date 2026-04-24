@@ -311,6 +311,13 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.bucketUsersLoading = false
 		return m, nil
 
+	case directBucketMetadataLoadedMsg:
+		if m.currentBucketName() != msg.bucket.name {
+			return m, nil
+		}
+		m.items[m.cursor] = msg.bucket
+		return m, nil
+
 	case userPickerLoadedMsg:
 		if msg.bucket != m.currentBucketName() || m.mode != bucketDetailPickUser {
 			return m, nil
@@ -1080,6 +1087,34 @@ func (m bucketsModel) loadPrefixes() tea.Cmd {
 	}
 }
 
+func (m bucketsModel) loadDirectBucketMetadata() tea.Cmd {
+	bucket := m.items[m.cursor]
+	return func() tea.Msg {
+		ctx := context.Background()
+		item := bucket
+
+		if buckets, err := m.client.ListBuckets(ctx); err == nil {
+			for _, b := range buckets {
+				if b.Name != bucket.name {
+					continue
+				}
+				item.region = b.Region
+				item.created = b.CreationDate.Format("2006-01-02")
+				break
+			}
+		}
+
+		stats, _ := m.client.GetBucketStats(ctx, bucket.name, item.region)
+		item.objects = stats.ObjectCount
+		item.sizeBytes = stats.SizeBytes
+
+		accesses, _ := m.client.GetPrefixAccessStatus(ctx, bucket.name, item.region, []string{""})
+		item.isPublic = len(accesses) > 0 && accesses[0].IsPublic
+
+		return directBucketMetadataLoadedMsg{bucket: item}
+	}
+}
+
 // loadBucketUsers fetches the list of users with access to the currently selected bucket.
 func (m bucketsModel) loadBucketUsers() tea.Cmd {
 	bucket := m.items[m.cursor]
@@ -1267,7 +1302,11 @@ func (m bucketsModel) viewDetail() string {
 	s += fmt.Sprintf("  %s   %s\n", labelStyle.Render("Region:"), valueStyle.Render(bucket.region))
 	s += fmt.Sprintf("  %s  %s\n", labelStyle.Render("Objects:"), valueStyle.Render(formatCount(bucket.objects)))
 	s += fmt.Sprintf("  %s     %s\n", labelStyle.Render("Size:"), valueStyle.Render(formatSize(bucket.sizeBytes)))
-	s += fmt.Sprintf("  %s  %s\n", labelStyle.Render("Created:"), valueStyle.Render(bucket.created))
+	created := bucket.created
+	if created == "" {
+		created = "Unknown"
+	}
+	s += fmt.Sprintf("  %s  %s\n", labelStyle.Render("Created:"), valueStyle.Render(created))
 	s += "\n"
 
 	// Bucket-level access toggle (row 0)
