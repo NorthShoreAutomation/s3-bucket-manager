@@ -545,10 +545,10 @@ func TestListBucketUsers(t *testing.T) {
 // attempts iam:ListUsers without permission.
 type accessDeniedAPIError struct{ code string }
 
-func (e *accessDeniedAPIError) Error() string                      { return e.code + ": not authorized" }
-func (e *accessDeniedAPIError) ErrorCode() string                  { return e.code }
-func (e *accessDeniedAPIError) ErrorMessage() string               { return "not authorized" }
-func (e *accessDeniedAPIError) ErrorFault() smithy.ErrorFault      { return smithy.FaultClient }
+func (e *accessDeniedAPIError) Error() string                 { return e.code + ": not authorized" }
+func (e *accessDeniedAPIError) ErrorCode() string             { return e.code }
+func (e *accessDeniedAPIError) ErrorMessage() string          { return "not authorized" }
+func (e *accessDeniedAPIError) ErrorFault() smithy.ErrorFault { return smithy.FaultClient }
 
 var _ smithy.APIError = (*accessDeniedAPIError)(nil)
 
