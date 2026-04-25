@@ -339,8 +339,9 @@ func Run(profile, region, bucket string) error {
 // NewAppForBucket creates an App pre-seeded with a single bucket and opens
 // directly in bucket detail mode. Used when credentials cannot list buckets.
 func NewAppForBucket(ctx context.Context, client *awsClient.Client, bucket string) App {
-	// Best-effort region resolution. If GetBucketLocation is denied, fall
-	// back to the client's configured region.
+	// Resolve bucket region via HeadBucket so users never need to pass --region
+	// manually. Falls back to the client's configured region only if the
+	// HeadBucket probe fails (unreachable endpoint, bucket missing, etc.).
 	bucketRegion, err := client.GetBucketRegion(ctx, bucket)
 	if err != nil || bucketRegion == "" {
 		bucketRegion = client.Region

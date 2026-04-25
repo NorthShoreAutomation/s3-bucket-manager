@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"testing"
@@ -23,6 +24,7 @@ type mockIAM struct {
 	createUserErr          error
 	deleteUserErr          error
 	listUsersOutput        *iam.ListUsersOutput
+	listUsersErr           error
 	tagUserErr             error
 	getUserOutput          *iam.GetUserOutput
 	createAccessKeyOutput  *iam.CreateAccessKeyOutput
@@ -48,7 +50,7 @@ func (m *mockIAM) DeleteUser(ctx context.Context, params *iam.DeleteUserInput, o
 }
 
 func (m *mockIAM) ListUsers(ctx context.Context, params *iam.ListUsersInput, optFns ...func(*iam.Options)) (*iam.ListUsersOutput, error) {
-	return m.listUsersOutput, nil
+	return m.listUsersOutput, m.listUsersErr
 }
 
 func (m *mockIAM) TagUser(ctx context.Context, params *iam.TagUserInput, optFns ...func(*iam.Options)) (*iam.TagUserOutput, error) {
@@ -535,5 +537,54 @@ func TestListBucketUsers(t *testing.T) {
 	}
 	if _, ok := permMap["s3m-charlie"]; ok {
 		t.Error("charlie should not have access to target-bucket")
+	}
+}
+
+// accessDeniedAPIError satisfies smithy.APIError with AWS "AccessDenied" code,
+// reproducing the error shape that bucket-scoped IAM users see when the UI
+// attempts iam:ListUsers without permission.
+type accessDeniedAPIError struct{ code string }
+
+func (e *accessDeniedAPIError) Error() string                 { return e.code + ": not authorized" }
+func (e *accessDeniedAPIError) ErrorCode() string             { return e.code }
+func (e *accessDeniedAPIError) ErrorMessage() string          { return "not authorized" }
+func (e *accessDeniedAPIError) ErrorFault() smithy.ErrorFault { return smithy.FaultClient }
+
+var _ smithy.APIError = (*accessDeniedAPIError)(nil)
+
+func TestListManagedUsersReturnsErrIAMAccessDenied(t *testing.T) {
+	mock := &mockIAM{listUsersErr: &accessDeniedAPIError{code: "AccessDenied"}}
+	client := &Client{IAM: mock}
+
+	_, err := client.ListManagedUsers(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrIAMAccessDenied) {
+		t.Fatalf("expected ErrIAMAccessDenied, got %v", err)
+	}
+}
+
+func TestListManagedUsersAccessDeniedExceptionMapped(t *testing.T) {
+	// Some AWS services return "AccessDeniedException" instead of "AccessDenied".
+	mock := &mockIAM{listUsersErr: &accessDeniedAPIError{code: "AccessDeniedException"}}
+	client := &Client{IAM: mock}
+
+	_, err := client.ListManagedUsers(context.Background())
+	if !errors.Is(err, ErrIAMAccessDenied) {
+		t.Fatalf("expected ErrIAMAccessDenied for AccessDeniedException, got %v", err)
+	}
+}
+
+func TestListManagedUsersOtherErrorNotMapped(t *testing.T) {
+	mock := &mockIAM{listUsersErr: &accessDeniedAPIError{code: "ThrottlingException"}}
+	client := &Client{IAM: mock}
+
+	_, err := client.ListManagedUsers(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if errors.Is(err, ErrIAMAccessDenied) {
+		t.Fatal("unrelated error should not be mapped to ErrIAMAccessDenied")
 	}
 }

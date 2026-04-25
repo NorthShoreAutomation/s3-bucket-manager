@@ -24,6 +24,14 @@ func (s *stubS3ForBucketInit) GetBucketLocation(ctx context.Context, params *s3.
 	}, nil
 }
 
+// HeadBucket is stubbed to return an empty response. The manager-based
+// GetBucketRegion helper reads the bucket region from raw HTTP headers via
+// middleware that only runs against real SDK clients, so in-process tests
+// rely on the GetBucketLocation fallback path in Client.GetBucketRegion.
+func (s *stubS3ForBucketInit) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	return &s3.HeadBucketOutput{}, nil
+}
+
 func TestAppUpdateRoutesErrMsgToActiveModel(t *testing.T) {
 	app := App{
 		screen: screenUsers,
@@ -126,6 +134,52 @@ func TestBucketDetailShowsLoadErrorInsteadOfEmptyState(t *testing.T) {
 	}
 	if strings.Contains(view, "No users assigned.") {
 		t.Fatalf("expected error state to replace empty-state copy, got %q", view)
+	}
+}
+
+func TestBucketsRendersFriendlyIAMAccessDeniedMessage(t *testing.T) {
+	// When credentials cannot call iam:ListUsers (common for bucket-scoped keys),
+	// the raw AWS error must be translated to a friendly notice so the bucket
+	// detail view stays usable.
+	m := bucketsModel{
+		items: []bucketItem{{name: "bucket-a", region: "us-west-2"}},
+		mode:  bucketDetail,
+	}
+	m.bucketUsersLoading = true
+
+	updated, _ := m.update(bucketUsersLoadedMsg{
+		bucket: "bucket-a",
+		err:    awsClient.ErrIAMAccessDenied,
+	})
+
+	if updated.bucketUsersLoading {
+		t.Fatal("expected loading state to clear on error")
+	}
+	if !strings.Contains(updated.bucketUsersError, "IAM access denied") {
+		t.Fatalf("expected friendly IAM-access-denied message, got %q", updated.bucketUsersError)
+	}
+	if strings.Contains(updated.bucketUsersError, "ListUsers") {
+		t.Fatalf("friendly message should hide raw API call name, got %q", updated.bucketUsersError)
+	}
+}
+
+func TestBucketsRendersRawErrorForUnrelatedFailures(t *testing.T) {
+	// Non-IAM errors (throttling, network, etc.) should still bubble up as-is so
+	// operators can diagnose real failures — only AccessDenied on iam:ListUsers
+	// gets the friendly substitution.
+	m := bucketsModel{
+		items: []bucketItem{{name: "bucket-a", region: "us-west-2"}},
+		mode:  bucketDetail,
+	}
+	m.bucketUsersLoading = true
+
+	updated, _ := m.update(bucketUsersLoadedMsg{
+		bucket: "bucket-a",
+		err:    errors.New("throttled: rate exceeded"),
+	})
+
+	if !strings.Contains(updated.bucketUsersError, "throttled") {
+		t.Fatalf("expected raw error text to be preserved, got %q", updated.bucketUsersError)
 	}
 }
 

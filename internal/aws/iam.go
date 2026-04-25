@@ -24,11 +24,29 @@ const (
 	policyName      = "s3m-bucket-access"
 )
 
+// ErrIAMAccessDenied signals that the current credentials cannot perform
+// IAM user listing. Callers should render a friendly notice rather than
+// a raw AWS error — this is expected for bucket-scoped credentials.
+var ErrIAMAccessDenied = errors.New("IAM access denied: current credentials cannot list users")
+
+// isAccessDenied reports whether err is an AWS AccessDenied API error.
+func isAccessDenied(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := apiErr.ErrorCode()
+		return code == "AccessDenied" || code == "AccessDeniedException"
+	}
+	return false
+}
+
 // ListManagedUsers returns IAM users tagged with s3m:managed=true.
 // Tag checks and key counts are fetched concurrently for speed.
 func (c *Client) ListManagedUsers(ctx context.Context) ([]model.User, error) {
 	output, err := c.IAM.ListUsers(ctx, &iam.ListUsersInput{})
 	if err != nil {
+		if isAccessDenied(err) {
+			return nil, ErrIAMAccessDenied
+		}
 		return nil, fmt.Errorf("could not list users: %w", err)
 	}
 

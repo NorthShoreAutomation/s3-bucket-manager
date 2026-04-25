@@ -58,6 +58,10 @@ func (m *mockS3) GetBucketLocation(ctx context.Context, params *s3.GetBucketLoca
 	return m.getBucketLocationOutput, nil
 }
 
+func (m *mockS3) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error) {
+	return &s3.HeadBucketOutput{}, nil
+}
+
 func (m *mockS3) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	return &s3.PutObjectOutput{}, m.putObjectErr
 }
@@ -159,8 +163,8 @@ func TestListBuckets(t *testing.T) {
 	mock := &mockS3{
 		listBucketsOutput: &s3.ListBucketsOutput{
 			Buckets: []s3types.Bucket{
-				{Name: aws.String("my-bucket"), CreationDate: &now},
-				{Name: aws.String("other-bucket"), CreationDate: &now},
+				{Name: aws.String("my-bucket"), CreationDate: &now, BucketRegion: aws.String("us-west-2")},
+				{Name: aws.String("other-bucket"), CreationDate: &now, BucketRegion: aws.String("us-west-2")},
 			},
 		},
 		getBucketLocationOutput: &s3.GetBucketLocationOutput{
@@ -189,6 +193,80 @@ func TestListBuckets(t *testing.T) {
 	}
 	if buckets[0].Region != "us-west-2" {
 		t.Errorf("expected region 'us-west-2', got %q", buckets[0].Region)
+	}
+}
+
+func TestListBucketsFallsBackWhenBucketRegionEmpty(t *testing.T) {
+	// Older buckets / older AWS API responses may omit BucketRegion. The client
+	// must fall back to HeadBucket/GetBucketLocation so the user still gets a
+	// correct region without supplying --region manually.
+	now := time.Now()
+	mock := &mockS3{
+		listBucketsOutput: &s3.ListBucketsOutput{
+			Buckets: []s3types.Bucket{
+				// BucketRegion deliberately nil to simulate an empty response field.
+				{Name: aws.String("legacy-bucket"), CreationDate: &now},
+			},
+		},
+		// manager.GetBucketRegion will return "" because the stub HeadBucket
+		// skips SDK middleware; Client.GetBucketRegion then falls through to
+		// GetBucketLocation, which the mock supplies with us-east-2.
+		getBucketLocationOutput: &s3.GetBucketLocationOutput{
+			LocationConstraint: s3types.BucketLocationConstraintUsEast2,
+		},
+		getPublicAccessBlockOutput: &s3.GetPublicAccessBlockOutput{
+			PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{
+				BlockPublicAcls:       aws.Bool(true),
+				BlockPublicPolicy:     aws.Bool(true),
+				IgnorePublicAcls:      aws.Bool(true),
+				RestrictPublicBuckets: aws.Bool(true),
+			},
+		},
+	}
+	client := &Client{S3: mock, Region: "us-east-1"}
+
+	buckets, err := client.ListBuckets(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(buckets))
+	}
+	if buckets[0].Region != "us-east-2" {
+		t.Errorf("expected region 'us-east-2' from fallback, got %q", buckets[0].Region)
+	}
+}
+
+func TestGetBucketRegionFallsBackToGetBucketLocation(t *testing.T) {
+	mock := &mockS3{
+		getBucketLocationOutput: &s3.GetBucketLocationOutput{
+			LocationConstraint: s3types.BucketLocationConstraintEuCentral1,
+		},
+	}
+	client := &Client{S3: mock, Region: "us-east-1"}
+
+	region, err := client.GetBucketRegion(context.Background(), "some-bucket")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if region != "eu-central-1" {
+		t.Errorf("expected 'eu-central-1', got %q", region)
+	}
+}
+
+func TestGetBucketRegionUsEast1EmptyLocationConstraint(t *testing.T) {
+	// us-east-1 buckets return an empty LocationConstraint; must normalize.
+	mock := &mockS3{
+		getBucketLocationOutput: &s3.GetBucketLocationOutput{},
+	}
+	client := &Client{S3: mock, Region: "us-east-1"}
+
+	region, err := client.GetBucketRegion(context.Background(), "some-bucket")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if region != "us-east-1" {
+		t.Errorf("expected 'us-east-1', got %q", region)
 	}
 }
 
