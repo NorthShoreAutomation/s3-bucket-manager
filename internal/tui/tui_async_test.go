@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	tea "github.com/charmbracelet/bubbletea"
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
 	"github.com/dcorbell/s3m/internal/model"
@@ -226,5 +227,39 @@ func TestBucketDetailShowsUnknownCreatedWhenUnavailable(t *testing.T) {
 
 	if !strings.Contains(view, "Unknown") {
 		t.Fatalf("expected detail view to label missing created date as unknown, got %q", view)
+	}
+}
+
+func TestAddFolderModeIsTextInputActive(t *testing.T) {
+	app := App{
+		buckets: bucketsModel{mode: bucketDetailAddFolder},
+	}
+
+	if !app.isTextInputActive() {
+		t.Fatal("expected folder-name entry to suppress global shortcuts")
+	}
+}
+
+func TestBrowseAddFolderKeepsCurrentPrefixUntilCreateSucceeds(t *testing.T) {
+	m := bucketsModel{
+		items:        []bucketItem{{name: "bucket-a", region: "us-west-2"}},
+		mode:         bucketDetailAddFolder,
+		browsePrefix: "parent/",
+		browseItems: []awsClient.BrowseItem{
+			{Name: "existing/", Key: "parent/existing/", IsFolder: true},
+		},
+	}
+	m.prefixInput.SetValue("new-folder")
+
+	updated, cmd := m.updateBrowseAddFolder(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatal("expected create-folder command")
+	}
+	if updated.browsePrefix != "parent/" {
+		t.Fatalf("expected current prefix to remain until create succeeds, got %q", updated.browsePrefix)
+	}
+	if len(updated.browseItems) != 1 {
+		t.Fatalf("expected current browse items to remain until create succeeds, got %#v", updated.browseItems)
 	}
 }

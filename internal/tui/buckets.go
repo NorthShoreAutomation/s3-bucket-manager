@@ -288,6 +288,17 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.browseOffset = 0
 		return m, nil
 
+	case browseFolderCreatedMsg:
+		m.message = msg.message
+		m.detailMessage = msg.message
+		m.browsePrefix = msg.prefix
+		m.browseItems = nil
+		m.browseCursor = 0
+		m.browseOffset = 0
+		m.mode = bucketDetail
+		m.loading = true
+		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+
 	case folderCountedMsg:
 		m.loading = false
 		m.folderDeleteKey = msg.key
@@ -1077,17 +1088,16 @@ func (m bucketsModel) updateBrowseAddFolder(msg tea.KeyMsg) (bucketsModel, tea.C
 		bucket := m.items[m.cursor]
 		m.loading = true
 		m.mode = bucketDetail
-		// Auto-navigate into the new folder once the operation completes.
-		// The operationDoneMsg handler reloads the current browsePrefix.
-		m.browsePrefix = newKey
-		m.browseItems = nil
 		return m, func() tea.Msg {
 			ctx := context.Background()
 			err := m.client.CreatePrefix(ctx, bucket.name, newKey, bucket.region)
 			if err != nil {
 				return errMsg{err: err}
 			}
-			return operationDoneMsg{message: fmt.Sprintf("Created folder %s", newKey)}
+			return browseFolderCreatedMsg{
+				prefix:  newKey,
+				message: fmt.Sprintf("Created folder %s", newKey),
+			}
 		}
 	case "esc":
 		m.mode = bucketDetail

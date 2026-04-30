@@ -156,6 +156,7 @@ func (a App) isTextInputActive() bool {
 		a.buckets.mode == bucketsTypeDelete ||
 		a.buckets.mode == bucketsConfirmDeleteNonEmpty ||
 		a.buckets.mode == bucketDetailAddPrefix ||
+		a.buckets.mode == bucketDetailAddFolder ||
 		a.buckets.mode == bucketDetailConfirm ||
 		a.buckets.mode == bucketDetailDeleteFolder ||
 		a.buckets.mode == bucketDetailPickUser ||
@@ -250,6 +251,11 @@ type operationDoneMsg struct {
 
 type browseLoadedMsg struct {
 	items []awsClient.BrowseItem
+}
+
+type browseFolderCreatedMsg struct {
+	prefix  string
+	message string
 }
 
 type folderCountedMsg struct {
