@@ -43,6 +43,7 @@ const (
 	bucketsConfirmDeleteNonEmpty              // type bucket name to confirm emptying
 	bucketDetail                              // viewing a single bucket's details
 	bucketDetailAddPrefix                     // typing a new prefix name
+	bucketDetailAddFolder                     // typing a new folder name while browsing inside a prefix
 	bucketDetailConfirm                       // type 'yes' to confirm access change
 	bucketDetailDeleteFolder                  // type 'delete' to confirm folder deletion
 	bucketDetailPickUser                      // selecting a user to add
@@ -287,6 +288,17 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.browseOffset = 0
 		return m, nil
 
+	case browseFolderCreatedMsg:
+		m.message = msg.message
+		m.detailMessage = msg.message
+		m.browsePrefix = msg.prefix
+		m.browseItems = nil
+		m.browseCursor = 0
+		m.browseOffset = 0
+		m.mode = bucketDetail
+		m.loading = true
+		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+
 	case folderCountedMsg:
 		m.loading = false
 		m.folderDeleteKey = msg.key
@@ -410,6 +422,8 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			return m.updateDetail(msg)
 		case bucketDetailAddPrefix:
 			return m.updateDetailAddPrefix(msg)
+		case bucketDetailAddFolder:
+			return m.updateBrowseAddFolder(msg)
 		case bucketDetailConfirm:
 			return m.updateDetailConfirm(msg)
 		case bucketDetailDeleteFolder:
@@ -1049,6 +1063,52 @@ func (m bucketsModel) updateDetailAddPrefix(msg tea.KeyMsg) (bucketsModel, tea.C
 	}
 }
 
+func (m bucketsModel) updateBrowseAddFolder(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		raw := strings.TrimSpace(m.prefixInput.Value())
+		raw = strings.Trim(raw, "/")
+		if raw == "" {
+			return m, nil
+		}
+		newKey := m.browsePrefix + raw + "/"
+		// Reject duplicates within the current view
+		for _, item := range m.browseItems {
+			if item.Key == newKey {
+				m.detailMessage = fmt.Sprintf("Folder %q already exists here", raw)
+				m.mode = bucketDetail
+				return m, nil
+			}
+			if !item.IsFolder && item.Name == raw {
+				m.detailMessage = fmt.Sprintf("A file named %q already exists here", raw)
+				m.mode = bucketDetail
+				return m, nil
+			}
+		}
+		bucket := m.items[m.cursor]
+		m.loading = true
+		m.mode = bucketDetail
+		return m, func() tea.Msg {
+			ctx := context.Background()
+			err := m.client.CreatePrefix(ctx, bucket.name, newKey, bucket.region)
+			if err != nil {
+				return errMsg{err: err}
+			}
+			return browseFolderCreatedMsg{
+				prefix:  newKey,
+				message: fmt.Sprintf("Created folder %s", newKey),
+			}
+		}
+	case "esc":
+		m.mode = bucketDetail
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.prefixInput, cmd = m.prefixInput.Update(msg)
+		return m, cmd
+	}
+}
+
 func (m bucketsModel) updateDetailConfirm(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
@@ -1137,7 +1197,7 @@ func (m bucketsModel) loadBucketUsers() tea.Cmd {
 
 func (m bucketsModel) view() string {
 	switch m.mode {
-	case bucketDetail, bucketDetailAddPrefix, bucketDetailConfirm, bucketDetailDeleteFolder:
+	case bucketDetail, bucketDetailAddPrefix, bucketDetailAddFolder, bucketDetailConfirm, bucketDetailDeleteFolder:
 		return m.viewDetail()
 	case bucketDetailPickUser:
 		return m.viewPickUser()
@@ -1444,7 +1504,15 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
+		// New folder name overlay
+		if m.mode == bucketDetailAddFolder {
+			s += "\n  New folder name (created inside " + m.browsePrefix + "):\n"
+			s += "  " + m.prefixInput.View() + "\n\n"
+			s += helpStyle.Render("  enter: create  esc: cancel")
+			return s
+		}
+
+		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [n] New folder  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
 	} else {
 		// Prefix list
 		if len(m.prefixes) > 0 {
@@ -1766,6 +1834,12 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				return downloadDoneMsg{filename: item.Name, path: outPath}
 			})
 		}
+	case "n":
+		// Create a new folder at the current browse prefix
+		m.mode = bucketDetailAddFolder
+		m.prefixInput.SetValue("")
+		m.prefixInput.Focus()
+		return m, textinput.Blink
 	case "p":
 		// Open local file picker for upload
 		fp := newFilePicker()
