@@ -402,6 +402,9 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case downloadDoneMsg:
+		m.transferSnap = nil
+		m.transferCancel = nil
+		m.transferLabel = ""
 		m.loading = false
 		m.detailMessage = fmt.Sprintf("Downloaded %s to %s", msg.filename, msg.path)
 		m.deleteProgress = ""
@@ -1948,26 +1951,45 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		if m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
 			item := m.browseItems[m.browseCursor]
 			bucket := m.items[m.cursor]
-			m.loading = true
-			m.deleteProgress = fmt.Sprintf("Downloading %s...", item.Name)
-			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				ctx := context.Background()
+
+			snap := &atomic.Pointer[progress.Snapshot]{}
+			snap.Store(&progress.Snapshot{Done: 0, Total: -1})
+			ctx, cancel := context.WithCancel(context.Background())
+
+			m.transferSnap = snap
+			m.transferLabel = fmt.Sprintf("Downloading %s", item.Name)
+			m.transferTotal = -1
+			m.transferLastDone = 0
+			m.transferLastTime = time.Now()
+			m.transferRate = 0
+			m.transferCancel = cancel
+			m.deleteProgress = ""
+
+			return m, tea.Batch(transferTick(), func() tea.Msg {
 				cwd, err := os.Getwd()
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not get working directory: %w", err)}
 				}
-				body, _, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
+				body, size, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not download %s: %w", item.Name, err)}
 				}
 				defer body.Close()
+
+				// Now that we know the size, refresh the snapshot's Total.
+				snap.Store(&progress.Snapshot{Done: 0, Total: size})
+
+				reader := progress.NewReader(body, func(done int64) {
+					snap.Store(&progress.Snapshot{Done: done, Total: size})
+				})
+
 				outPath := filepath.Join(cwd, item.Name)
 				f, err := os.Create(outPath)
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not create file %s: %w", outPath, err)}
 				}
 				defer f.Close()
-				if _, err := io.Copy(f, body); err != nil {
+				if _, err := io.Copy(f, reader); err != nil {
 					return errMsg{err: fmt.Errorf("could not write file %s: %w", outPath, err)}
 				}
 				return downloadDoneMsg{filename: item.Name, path: outPath}
