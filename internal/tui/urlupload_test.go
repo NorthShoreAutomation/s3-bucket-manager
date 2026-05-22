@@ -103,7 +103,6 @@ func TestURLUploadStatusLineUsesCurrentRate(t *testing.T) {
 	}
 }
 
-
 func TestAppCtrlCCancelsURLUploadInsteadOfQuitting(t *testing.T) {
 	app := NewApp(nil)
 	cancelled := false
@@ -127,4 +126,3 @@ func TestAppCtrlCCancelsURLUploadInsteadOfQuitting(t *testing.T) {
 		t.Fatal("expected URL upload modal to remain active until cancellation result arrives")
 	}
 }
-

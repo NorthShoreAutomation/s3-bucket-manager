@@ -271,4 +271,3 @@ func ComputePartSize(contentLength int64) int64 {
 	}
 	return computed
 }
-

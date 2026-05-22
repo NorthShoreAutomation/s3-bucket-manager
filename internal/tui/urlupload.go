@@ -391,4 +391,3 @@ func (m urlUploadModel) viewWidth() int {
 	}
 	return 60
 }
-
