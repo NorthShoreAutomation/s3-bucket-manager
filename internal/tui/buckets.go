@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/atotto/clipboard"
+	bubprogress "github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,6 +20,7 @@ import (
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
 	"github.com/dcorbell/s3m/internal/model"
+	"github.com/dcorbell/s3m/internal/progress"
 )
 
 type bucketItem struct {
@@ -108,6 +112,17 @@ type bucketsModel struct {
 	// directBucket is true when the app was launched with --bucket, so the
 	// bucket list is unreachable and esc from the detail view should quit.
 	directBucket bool
+
+	// Transfer progress (upload via p, download via g).
+	// transferSnap is non-nil while a transfer is in flight.
+	transferSnap     *atomic.Pointer[progress.Snapshot]
+	transferBar      bubprogress.Model // bubbles progress bar
+	transferLabel    string            // e.g. "Uploading photo.jpg"
+	transferTotal    int64             // bytes; -1 when unknown
+	transferLastDone int64
+	transferLastTime time.Time
+	transferRate     float64
+	transferCancel   context.CancelFunc
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -129,6 +144,10 @@ func newBucketsModel(client *awsClient.Client) bucketsModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
+	transferBar := bubprogress.New(
+		bubprogress.WithDefaultGradient(),
+		bubprogress.WithoutPercentage(),
+	)
 	return bucketsModel{
 		client:        client,
 		nameInput:     ti,
@@ -138,6 +157,7 @@ func newBucketsModel(client *awsClient.Client) bucketsModel {
 		confirmInput2: ci2,
 		loading:       true,
 		spinner:       sp,
+		transferBar:   transferBar,
 	}
 }
 
@@ -405,6 +425,37 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
 		}
+
+	case transferTickMsg:
+		if m.transferSnap == nil {
+			return m, nil
+		}
+		snap := m.transferSnap.Load()
+		if snap != nil {
+			now := time.Now()
+			elapsed := now.Sub(m.transferLastTime).Seconds()
+			delta := snap.Done - m.transferLastDone
+			if elapsed > 0.01 && delta > 0 {
+				m.transferRate = float64(delta) / elapsed
+			}
+			m.transferLastDone = snap.Done
+			m.transferLastTime = now
+			var barCmd tea.Cmd
+			if snap.Total > 0 {
+				pct := float64(snap.Done) / float64(snap.Total)
+				if pct > 1.0 {
+					pct = 1.0
+				}
+				barCmd = m.transferBar.SetPercent(pct)
+			}
+			return m, tea.Batch(barCmd, transferTick())
+		}
+		return m, transferTick()
+
+	case bubprogress.FrameMsg:
+		model, cmd := m.transferBar.Update(msg)
+		m.transferBar = model.(bubprogress.Model)
+		return m, cmd
 
 	case tea.KeyMsg:
 		switch m.mode {
@@ -1193,6 +1244,51 @@ func (m bucketsModel) loadBucketUsers() tea.Cmd {
 	}
 }
 
+// transferTickMsg fires every 250ms while a transfer is in flight and
+// drives the progress bar / rate display.
+type transferTickMsg struct{}
+
+func transferTick() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
+		return transferTickMsg{}
+	})
+}
+
+// renderTransferProgress returns the multi-line progress block shown
+// during an in-flight upload or download. Returns "" when no transfer
+// is active.
+func (m bucketsModel) renderTransferProgress() string {
+	if m.transferSnap == nil {
+		return ""
+	}
+	snap := m.transferSnap.Load()
+	if snap == nil {
+		return ""
+	}
+
+	label := m.transferLabel
+	bar := m.transferBar.View()
+
+	done := formatSize(snap.Done)
+	rate := progress.FormatRate(m.transferRate)
+
+	var status string
+	if snap.Total > 0 {
+		total := formatSize(snap.Total)
+		pct := float64(snap.Done) / float64(snap.Total) * 100
+		eta := ""
+		if rateVal := progress.ParseRateBytesPerSec(rate); rateVal > 0 {
+			remaining := float64(snap.Total-snap.Done) / rateVal
+			eta = " — ETA " + progress.FormatDuration(time.Duration(remaining*float64(time.Second)))
+		}
+		status = fmt.Sprintf("%s / %s (%.0f%%) — %s%s", done, total, pct, rate, eta)
+	} else {
+		status = fmt.Sprintf("%s — %s", done, rate)
+	}
+
+	return fmt.Sprintf("  %s\n  %s\n  %s\n", label, bar, dimStyle.Render(status))
+}
+
 // --- Views ---
 
 func (m bucketsModel) view() string {
@@ -1512,7 +1608,12 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [n] New folder  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
+		if tp := m.renderTransferProgress(); tp != "" {
+			s += "\n" + tp
+			s += helpStyle.Render("  [esc] cancel")
+		} else {
+			s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [n] New folder  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
+		}
 	} else {
 		// Prefix list
 		if len(m.prefixes) > 0 {
