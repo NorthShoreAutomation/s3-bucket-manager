@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `aws.Client.DownloadObject` now also returns the object's size, enabling percentage and ETA display during downloads.
+- Local file upload (`[p]`) now uses multipart upload (`UploadStream`) instead of single-shot `PutObject`. This both supports large files (>5 GiB) and fixes an HTTP 411 (Length Required) regression from wrapping `*os.File` in the new `progress.Reader`, which masked the file's seekability that `PutObject` relied on for `Content-Length`.
 
 ### Added
 - Create a new folder while browsing inside a bucket — press `[n]` in the file browser to enter a folder name, then auto-navigate into it so files can be uploaded immediately.
