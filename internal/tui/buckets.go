@@ -1830,6 +1830,10 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		return m, cmd
 	}
 
+	if m.transferSnap != nil && msg.String() != "esc" {
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "up", "k":
 		if m.browseCursor > 0 {
