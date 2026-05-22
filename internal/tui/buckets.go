@@ -236,6 +236,16 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.bucketUsersLoading = false
+		wasTransfer := m.transferSnap != nil
+		if wasTransfer {
+			m.transferSnap = nil
+			m.transferCancel = nil
+			m.transferLabel = ""
+		}
+		if wasTransfer && errors.Is(msg.err, context.Canceled) {
+			m.detailMessage = "Cancelled"
+			return m, nil
+		}
 		return m, nil
 
 	case bucketsLoadedMsg:
@@ -398,6 +408,9 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case uploadDoneMsg:
+		m.transferSnap = nil
+		m.transferCancel = nil
+		m.transferLabel = ""
 		m.loading = false
 		m.detailMessage = fmt.Sprintf("Uploaded %s", msg.filename)
 		m.deleteProgress = ""
@@ -1768,23 +1781,44 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			return m, nil
 		}
 		if selected != "" {
-			// File selected — start upload
 			m.showFilePicker = false
-			m.loading = true
 			bucket := m.items[m.cursor]
 			prefix := m.browsePrefix
 			filename := filepath.Base(selected)
-			m.deleteProgress = fmt.Sprintf("Uploading %s...", filename)
-			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				ctx := context.Background()
+
+			// Stat to learn the total size for percentage / ETA.
+			var totalSize int64 = -1
+			if info, statErr := os.Stat(selected); statErr == nil {
+				totalSize = info.Size()
+			}
+
+			// Set up the progress snapshot and cancellation context.
+			snap := &atomic.Pointer[progress.Snapshot]{}
+			snap.Store(&progress.Snapshot{Done: 0, Total: totalSize})
+			ctx, cancel := context.WithCancel(context.Background())
+
+			m.transferSnap = snap
+			m.transferLabel = fmt.Sprintf("Uploading %s", filename)
+			m.transferTotal = totalSize
+			m.transferLastDone = 0
+			m.transferLastTime = time.Now()
+			m.transferRate = 0
+			m.transferCancel = cancel
+			m.deleteProgress = ""
+
+			return m, tea.Batch(transferTick(), func() tea.Msg {
 				f, err := os.Open(selected)
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not open %s: %w", selected, err)}
 				}
 				defer f.Close()
+
+				reader := progress.NewReader(f, func(done int64) {
+					snap.Store(&progress.Snapshot{Done: done, Total: totalSize})
+				})
+
 				key := prefix + filename
-				err = m.client.UploadObject(ctx, bucket.name, key, bucket.region, f)
-				if err != nil {
+				if err := m.client.UploadObject(ctx, bucket.name, key, bucket.region, reader); err != nil {
 					return errMsg{err: err}
 				}
 				return uploadDoneMsg{filename: filename}
@@ -1848,6 +1882,10 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.browseItems = nil
 		return m, nil
 	case "esc":
+		if m.transferSnap != nil && m.transferCancel != nil {
+			m.transferCancel()
+			return m, nil
+		}
 		// Esc always goes back to prefix list
 		m.browsePrefix = ""
 		m.browseItems = nil
