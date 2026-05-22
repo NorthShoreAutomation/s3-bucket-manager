@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Progress bar, transfer rate, percentage complete, and ETA for local-file uploads (`[p]`) and object downloads (`[g]`) in the TUI browse view.
+- `[esc]` cancels an in-flight upload or download.
+- New `internal/progress` package providing a shared counting `io.Reader` and rate/duration formatters reused by URL upload, local upload, download, and the HTTP-copy path.
+
+### Changed
+- `aws.Client.DownloadObject` now also returns the object's size, enabling percentage and ETA display during downloads.
+
+### Added
 - Create a new folder while browsing inside a bucket — press `[n]` in the file browser to enter a folder name, then auto-navigate into it so files can be uploaded immediately.
 
 ### Fixed
