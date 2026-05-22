@@ -507,9 +507,11 @@ func (c *Client) ListContents(ctx context.Context, bucket, prefix, region string
 	return items, nil
 }
 
-// DownloadObject returns the body of an S3 object as an io.ReadCloser.
-// The caller is responsible for closing the returned reader.
-func (c *Client) DownloadObject(ctx context.Context, bucket, key, region string) (io.ReadCloser, error) {
+// DownloadObject returns the body of an S3 object as an io.ReadCloser
+// along with the object's size in bytes (or -1 when the server did not
+// supply a Content-Length). The caller is responsible for closing the
+// returned reader.
+func (c *Client) DownloadObject(ctx context.Context, bucket, key, region string) (io.ReadCloser, int64, error) {
 	opts := func(o *s3.Options) {
 		if region != "" {
 			o.Region = region
@@ -520,9 +522,13 @@ func (c *Client) DownloadObject(ctx context.Context, bucket, key, region string)
 		Key:    aws.String(key),
 	}, opts)
 	if err != nil {
-		return nil, fmt.Errorf("could not download %q: %w", key, err)
+		return nil, 0, fmt.Errorf("could not download %q: %w", key, err)
 	}
-	return output.Body, nil
+	size := int64(-1)
+	if output.ContentLength != nil {
+		size = *output.ContentLength
+	}
+	return output.Body, size, nil
 }
 
 // UploadObject uploads a file to S3 at the given key.

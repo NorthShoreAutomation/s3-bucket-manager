@@ -1817,7 +1817,7 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not get working directory: %w", err)}
 				}
-				body, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
+				body, _, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not download %s: %w", item.Name, err)}
 				}
