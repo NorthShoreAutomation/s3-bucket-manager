@@ -15,7 +15,6 @@ package tui
 import (
 	"strings"
 	"testing"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -104,27 +103,6 @@ func TestURLUploadStatusLineUsesCurrentRate(t *testing.T) {
 	}
 }
 
-// TestFormatRate covers the formatRate helper.
-func TestFormatRate(t *testing.T) {
-	cases := []struct {
-		bps  float64
-		want string
-	}{
-		{0, "—/s"},
-		{-1, "—/s"},
-		{512, "512 B/s"},
-		{1.5 * (1 << 10), "1.5 KB/s"},
-		{3.2 * (1 << 20), "3.2 MB/s"},
-		{1.1 * (1 << 30), "1.1 GB/s"},
-	}
-	for _, tc := range cases {
-		got := formatRate(tc.bps)
-		if got != tc.want {
-			t.Errorf("formatRate(%v) = %q, want %q", tc.bps, got, tc.want)
-		}
-	}
-}
-
 func TestAppCtrlCCancelsURLUploadInsteadOfQuitting(t *testing.T) {
 	app := NewApp(nil)
 	cancelled := false
@@ -146,24 +124,5 @@ func TestAppCtrlCCancelsURLUploadInsteadOfQuitting(t *testing.T) {
 	}
 	if updated.buckets.urlUpload == nil {
 		t.Fatal("expected URL upload modal to remain active until cancellation result arrives")
-	}
-}
-
-// TestFormatDuration covers the formatDuration helper.
-func TestFormatDuration(t *testing.T) {
-	cases := []struct {
-		d    time.Duration
-		want string
-	}{
-		{0, "0s"},
-		{45 * time.Second, "45s"},
-		{62 * time.Second, "1m02s"},
-		{time.Hour + 23*time.Minute, "1h23m"},
-	}
-	for _, tc := range cases {
-		got := formatDuration(tc.d)
-		if got != tc.want {
-			t.Errorf("formatDuration(%v) = %q, want %q", tc.d, got, tc.want)
-		}
 	}
 }

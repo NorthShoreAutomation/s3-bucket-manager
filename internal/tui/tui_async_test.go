@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -12,6 +13,7 @@ import (
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
 	"github.com/dcorbell/s3m/internal/model"
+	"github.com/dcorbell/s3m/internal/progress"
 )
 
 type stubS3ForBucketInit struct {
@@ -50,6 +52,108 @@ func TestAppUpdateRoutesErrMsgToActiveModel(t *testing.T) {
 	}
 	if updated.users.loading {
 		t.Fatal("expected users model loading state to be cleared on errMsg")
+	}
+}
+
+func TestAppDoesNotRecordTransferCancelAsGlobalError(t *testing.T) {
+	snap := &atomic.Pointer[progress.Snapshot]{}
+	snap.Store(&progress.Snapshot{Done: 1, Total: 10})
+	app := App{
+		screen: screenBuckets,
+		buckets: bucketsModel{
+			mode:         bucketDetail,
+			transferSnap: snap,
+		},
+	}
+
+	next, _ := app.Update(errMsg{err: context.Canceled})
+	updated := next.(App)
+
+	if updated.err != nil {
+		t.Fatalf("expected transfer cancellation not to be recorded as app error, got %v", updated.err)
+	}
+	if updated.buckets.detailMessage != "Cancelled" {
+		t.Fatalf("expected cancellation detail message, got %q", updated.buckets.detailMessage)
+	}
+}
+
+func TestBrowseKeysIgnoredDuringTransferExceptCancel(t *testing.T) {
+	snap := &atomic.Pointer[progress.Snapshot]{}
+	snap.Store(&progress.Snapshot{Done: 1, Total: 10})
+	cancelled := false
+	m := bucketsModel{
+		items: []bucketItem{{name: "bucket-a"}},
+		mode:  bucketDetail,
+		browseItems: []awsClient.BrowseItem{
+			{Name: "file.txt", Key: "file.txt"},
+		},
+		transferSnap: snap,
+		transferCancel: func() {
+			cancelled = true
+		},
+	}
+
+	updated, cmd := m.updateBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if cmd != nil {
+		t.Fatal("expected no command for non-cancel key during transfer")
+	}
+	if updated.showFilePicker {
+		t.Fatal("expected upload picker not to open during transfer")
+	}
+
+	updated, cmd = updated.updateBrowse(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("expected cancel key not to start a command")
+	}
+	if !cancelled {
+		t.Fatal("expected esc to call transfer cancel")
+	}
+}
+
+func TestRootFilePickerKeysRouteThroughDetail(t *testing.T) {
+	m := bucketsModel{
+		items:          []bucketItem{{name: "bucket-a"}},
+		mode:           bucketDetail,
+		showFilePicker: true,
+		filePicker: filePickerModel{
+			items: []localFileItem{{name: "file.txt"}},
+		},
+	}
+
+	updated, cmd := m.updateDetail(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("expected root picker escape not to start a command")
+	}
+	if updated.showFilePicker {
+		t.Fatal("expected escape to close the root file picker")
+	}
+	if updated.mode != bucketDetail {
+		t.Fatalf("expected to remain in bucket detail, got mode %v", updated.mode)
+	}
+}
+
+func TestRootTransferCancelRoutesThroughDetail(t *testing.T) {
+	snap := &atomic.Pointer[progress.Snapshot]{}
+	snap.Store(&progress.Snapshot{Done: 1, Total: 10})
+	cancelled := false
+	m := bucketsModel{
+		items:        []bucketItem{{name: "bucket-a"}},
+		mode:         bucketDetail,
+		transferSnap: snap,
+		transferCancel: func() {
+			cancelled = true
+		},
+	}
+
+	updated, cmd := m.updateDetail(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("expected root transfer escape not to start a command")
+	}
+	if !cancelled {
+		t.Fatal("expected escape to cancel the root transfer")
+	}
+	if updated.mode != bucketDetail {
+		t.Fatalf("expected to remain in bucket detail, got mode %v", updated.mode)
 	}
 }
 

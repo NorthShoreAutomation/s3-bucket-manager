@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -92,7 +93,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case errMsg:
-		a.err = msg.err
+		if a.screen != screenBuckets || a.buckets.transferSnap == nil || !errors.Is(msg.err, context.Canceled) {
+			a.err = msg.err
+		}
 		hadErr = true
 	}
 

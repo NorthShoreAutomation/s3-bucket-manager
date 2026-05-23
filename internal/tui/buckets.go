@@ -8,8 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/atotto/clipboard"
+	bubprogress "github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,6 +20,7 @@ import (
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
 	"github.com/dcorbell/s3m/internal/model"
+	"github.com/dcorbell/s3m/internal/progress"
 )
 
 type bucketItem struct {
@@ -108,6 +112,17 @@ type bucketsModel struct {
 	// directBucket is true when the app was launched with --bucket, so the
 	// bucket list is unreachable and esc from the detail view should quit.
 	directBucket bool
+
+	// Transfer progress (upload via p, download via g).
+	// transferSnap is non-nil while a transfer is in flight.
+	transferSnap     *atomic.Pointer[progress.Snapshot]
+	transferBar      bubprogress.Model // bubbles progress bar
+	transferLabel    string            // e.g. "Uploading photo.jpg"
+	transferTotal    int64             // bytes; -1 when unknown
+	transferLastDone int64
+	transferLastTime time.Time
+	transferRate     float64
+	transferCancel   context.CancelFunc
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -129,6 +144,10 @@ func newBucketsModel(client *awsClient.Client) bucketsModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
+	transferBar := bubprogress.New(
+		bubprogress.WithDefaultGradient(),
+		bubprogress.WithoutPercentage(),
+	)
 	return bucketsModel{
 		client:        client,
 		nameInput:     ti,
@@ -138,6 +157,7 @@ func newBucketsModel(client *awsClient.Client) bucketsModel {
 		confirmInput2: ci2,
 		loading:       true,
 		spinner:       sp,
+		transferBar:   transferBar,
 	}
 }
 
@@ -216,6 +236,16 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	case errMsg:
 		m.loading = false
 		m.bucketUsersLoading = false
+		wasTransfer := m.transferSnap != nil
+		if wasTransfer {
+			m.transferSnap = nil
+			m.transferCancel = nil
+			m.transferLabel = ""
+		}
+		if wasTransfer && errors.Is(msg.err, context.Canceled) {
+			m.detailMessage = "Cancelled"
+			return m, nil
+		}
 		return m, nil
 
 	case bucketsLoadedMsg:
@@ -372,12 +402,18 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case downloadDoneMsg:
+		m.transferSnap = nil
+		m.transferCancel = nil
+		m.transferLabel = ""
 		m.loading = false
 		m.detailMessage = fmt.Sprintf("Downloaded %s to %s", msg.filename, msg.path)
 		m.deleteProgress = ""
 		return m, nil
 
 	case uploadDoneMsg:
+		m.transferSnap = nil
+		m.transferCancel = nil
+		m.transferLabel = ""
 		m.loading = false
 		m.detailMessage = fmt.Sprintf("Uploaded %s", msg.filename)
 		m.deleteProgress = ""
@@ -405,6 +441,37 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
 		}
+
+	case transferTickMsg:
+		if m.transferSnap == nil {
+			return m, nil
+		}
+		snap := m.transferSnap.Load()
+		if snap != nil {
+			now := time.Now()
+			elapsed := now.Sub(m.transferLastTime).Seconds()
+			delta := snap.Done - m.transferLastDone
+			if elapsed > 0.01 && delta > 0 {
+				m.transferRate = float64(delta) / elapsed
+			}
+			m.transferLastDone = snap.Done
+			m.transferLastTime = now
+			var barCmd tea.Cmd
+			if snap.Total > 0 {
+				pct := float64(snap.Done) / float64(snap.Total)
+				if pct > 1.0 {
+					pct = 1.0
+				}
+				barCmd = m.transferBar.SetPercent(pct)
+			}
+			return m, tea.Batch(barCmd, transferTick())
+		}
+		return m, transferTick()
+
+	case bubprogress.FrameMsg:
+		model, cmd := m.transferBar.Update(msg)
+		m.transferBar = model.(bubprogress.Model)
+		return m, cmd
 
 	case tea.KeyMsg:
 		switch m.mode {
@@ -653,8 +720,10 @@ func (m bucketsModel) prefixIndex() int {
 }
 
 func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
-	// When browsing inside a prefix, delegate to browse handler
-	if m.browsePrefix != "" || len(m.browseItems) > 0 {
+	// When browsing, picking a local file, or showing transfer progress,
+	// delegate to the browse handler. Root-level uploads have no browse prefix
+	// or items, but they still need the picker and cancel keys handled there.
+	if m.showFilePicker || m.transferSnap != nil || m.browsePrefix != "" || len(m.browseItems) > 0 {
 		return m.updateBrowse(msg)
 	}
 
@@ -795,6 +864,33 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.prefixInput.SetValue("")
 		m.prefixInput.Focus()
 		return m, textinput.Blink
+	case "n":
+		// Create a new folder at the bucket root. Uses the same flow as
+		// the browse view's "new folder" so the user drops into the new
+		// folder immediately and can upload from there.
+		m.browsePrefix = ""
+		m.mode = bucketDetailAddFolder
+		m.prefixInput.SetValue("")
+		m.prefixInput.Focus()
+		return m, textinput.Blink
+	case "p":
+		// Upload a local file to the bucket root.
+		m.browsePrefix = ""
+		fp := newFilePicker()
+		fp.width = m.width
+		fp.height = m.height
+		fp = fp.loadDir()
+		m.filePicker = fp
+		m.showFilePicker = true
+		return m, nil
+	case "U":
+		// Upload from a URL to the bucket root.
+		m.browsePrefix = ""
+		bucket := m.items[m.cursor]
+		um := newURLUpload(m.client, bucket.name, bucket.region, m.browsePrefix)
+		um.width = m.width
+		m.urlUpload = &um
+		return m, m.urlUpload.Init()
 	case "r":
 		m.loading = true
 		m.detailMessage = ""
@@ -1193,6 +1289,51 @@ func (m bucketsModel) loadBucketUsers() tea.Cmd {
 	}
 }
 
+// transferTickMsg fires every 250ms while a transfer is in flight and
+// drives the progress bar / rate display.
+type transferTickMsg struct{}
+
+func transferTick() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
+		return transferTickMsg{}
+	})
+}
+
+// renderTransferProgress returns the multi-line progress block shown
+// during an in-flight upload or download. Returns "" when no transfer
+// is active.
+func (m bucketsModel) renderTransferProgress() string {
+	if m.transferSnap == nil {
+		return ""
+	}
+	snap := m.transferSnap.Load()
+	if snap == nil {
+		return ""
+	}
+
+	label := m.transferLabel
+	bar := m.transferBar.View()
+
+	done := formatSize(snap.Done)
+	rate := progress.FormatRate(m.transferRate)
+
+	var status string
+	if snap.Total > 0 {
+		total := formatSize(snap.Total)
+		pct := float64(snap.Done) / float64(snap.Total) * 100
+		eta := ""
+		if rateVal := progress.ParseRateBytesPerSec(rate); rateVal > 0 {
+			remaining := float64(snap.Total-snap.Done) / rateVal
+			eta = " — ETA " + progress.FormatDuration(time.Duration(remaining*float64(time.Second)))
+		}
+		status = fmt.Sprintf("%s / %s (%.0f%%) — %s%s", done, total, pct, rate, eta)
+	} else {
+		status = fmt.Sprintf("%s — %s", done, rate)
+	}
+
+	return fmt.Sprintf("  %s\n  %s\n  %s\n", label, bar, dimStyle.Render(status))
+}
+
 // --- Views ---
 
 func (m bucketsModel) view() string {
@@ -1506,15 +1647,30 @@ func (m bucketsModel) viewDetail() string {
 
 		// New folder name overlay
 		if m.mode == bucketDetailAddFolder {
-			s += "\n  New folder name (created inside " + m.browsePrefix + "):\n"
+			parent := m.browsePrefix
+			if parent == "" {
+				parent = "bucket root"
+			}
+			s += "\n  New folder name (created inside " + parent + "):\n"
 			s += "  " + m.prefixInput.View() + "\n\n"
 			s += helpStyle.Render("  enter: create  esc: cancel")
 			return s
 		}
 
-		s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [n] New folder  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
+		if tp := m.renderTransferProgress(); tp != "" {
+			s += "\n" + tp
+			s += helpStyle.Render("  [esc] cancel")
+		} else {
+			s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [n] New folder  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
+		}
 	} else {
 		// Prefix list
+		if tp := m.renderTransferProgress(); tp != "" {
+			s += "\n" + tp
+			s += helpStyle.Render("  [esc] cancel")
+			return s
+		}
+
 		if len(m.prefixes) > 0 {
 			s += "  " + labelStyle.Render("Prefixes:") + "  " + dimStyle.Render("[→ to browse]") + "\n"
 			s += "  " + lipgloss.NewStyle().Foreground(colorBorder).Render(strings.Repeat("─", 40)) + "\n"
@@ -1544,6 +1700,11 @@ func (m bucketsModel) viewDetail() string {
 			s += "  " + m.prefixInput.View() + "\n\n"
 			s += helpStyle.Render("  enter: add  esc: cancel")
 			return s
+		case bucketDetailAddFolder:
+			s += "\n  New folder name (created at bucket root):\n"
+			s += "  " + m.prefixInput.View() + "\n\n"
+			s += helpStyle.Render("  enter: create  esc: cancel")
+			return s
 		case bucketDetailConfirm:
 			s += "\n"
 			s += "  " + warningStyle.Render(m.confirmAction) + "\n"
@@ -1556,11 +1717,11 @@ func (m bucketsModel) viewDetail() string {
 		// Context-sensitive help bar
 		switch m.cursorSection() {
 		case "bucket":
-			s += "\n" + helpStyle.Render("  [enter] Toggle public/private  [a] Add user  [r] Refresh  [esc] Back")
+			s += "\n" + helpStyle.Render("  [enter] Toggle public/private  [a] Add user  [n] New folder  [p] Upload  [U] URL upload  [r] Refresh  [esc] Back")
 		case "users":
-			s += "\n" + helpStyle.Render("  [enter] Cycle permission  [a] Add user  [d] Remove  [r] Refresh  [esc] Back")
+			s += "\n" + helpStyle.Render("  [enter] Cycle permission  [a] Add user  [d] Remove  [n] New folder  [p] Upload  [r] Refresh  [esc] Back")
 		case "prefixes":
-			s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [c] Add prefix  [d] Delete prefix  [r] Refresh  [←] Back")
+			s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [c] Add prefix  [n] New folder  [p] Upload  [d] Delete prefix  [r] Refresh  [←] Back")
 		}
 	}
 	return s
@@ -1667,29 +1828,54 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			return m, nil
 		}
 		if selected != "" {
-			// File selected — start upload
 			m.showFilePicker = false
-			m.loading = true
 			bucket := m.items[m.cursor]
 			prefix := m.browsePrefix
 			filename := filepath.Base(selected)
-			m.deleteProgress = fmt.Sprintf("Uploading %s...", filename)
-			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				ctx := context.Background()
+
+			// Stat to learn the total size for percentage / ETA.
+			var totalSize int64 = -1
+			if info, statErr := os.Stat(selected); statErr == nil {
+				totalSize = info.Size()
+			}
+
+			// Set up the progress snapshot and cancellation context.
+			snap := &atomic.Pointer[progress.Snapshot]{}
+			snap.Store(&progress.Snapshot{Done: 0, Total: totalSize})
+			ctx, cancel := context.WithCancel(context.Background())
+
+			m.transferSnap = snap
+			m.transferLabel = fmt.Sprintf("Uploading %s", filename)
+			m.transferTotal = totalSize
+			m.transferLastDone = 0
+			m.transferLastTime = time.Now()
+			m.transferRate = 0
+			m.transferCancel = cancel
+			m.deleteProgress = ""
+
+			return m, tea.Batch(transferTick(), func() tea.Msg {
 				f, err := os.Open(selected)
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not open %s: %w", selected, err)}
 				}
 				defer f.Close()
+
+				reader := progress.NewReader(f, func(done int64) {
+					snap.Store(&progress.Snapshot{Done: done, Total: totalSize})
+				})
+
 				key := prefix + filename
-				err = m.client.UploadObject(ctx, bucket.name, key, bucket.region, f)
-				if err != nil {
+				if err := m.client.UploadObjectSized(ctx, bucket.name, key, bucket.region, reader, totalSize); err != nil {
 					return errMsg{err: err}
 				}
 				return uploadDoneMsg{filename: filename}
 			})
 		}
 		return m, cmd
+	}
+
+	if m.transferSnap != nil && msg.String() != "esc" {
+		return m, nil
 	}
 
 	switch msg.String() {
@@ -1747,6 +1933,10 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.browseItems = nil
 		return m, nil
 	case "esc":
+		if m.transferSnap != nil && m.transferCancel != nil {
+			m.transferCancel()
+			return m, nil
+		}
 		// Esc always goes back to prefix list
 		m.browsePrefix = ""
 		m.browseItems = nil
@@ -1809,26 +1999,45 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		if m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
 			item := m.browseItems[m.browseCursor]
 			bucket := m.items[m.cursor]
-			m.loading = true
-			m.deleteProgress = fmt.Sprintf("Downloading %s...", item.Name)
-			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				ctx := context.Background()
+
+			snap := &atomic.Pointer[progress.Snapshot]{}
+			snap.Store(&progress.Snapshot{Done: 0, Total: -1})
+			ctx, cancel := context.WithCancel(context.Background())
+
+			m.transferSnap = snap
+			m.transferLabel = fmt.Sprintf("Downloading %s", item.Name)
+			m.transferTotal = -1
+			m.transferLastDone = 0
+			m.transferLastTime = time.Now()
+			m.transferRate = 0
+			m.transferCancel = cancel
+			m.deleteProgress = ""
+
+			return m, tea.Batch(transferTick(), func() tea.Msg {
 				cwd, err := os.Getwd()
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not get working directory: %w", err)}
 				}
-				body, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
+				body, size, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not download %s: %w", item.Name, err)}
 				}
 				defer body.Close()
+
+				// Now that we know the size, refresh the snapshot's Total.
+				snap.Store(&progress.Snapshot{Done: 0, Total: size})
+
+				reader := progress.NewReader(body, func(done int64) {
+					snap.Store(&progress.Snapshot{Done: done, Total: size})
+				})
+
 				outPath := filepath.Join(cwd, item.Name)
 				f, err := os.Create(outPath)
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not create file %s: %w", outPath, err)}
 				}
 				defer f.Close()
-				if _, err := io.Copy(f, body); err != nil {
+				if _, err := io.Copy(f, reader); err != nil {
 					return errMsg{err: fmt.Errorf("could not write file %s: %w", outPath, err)}
 				}
 				return downloadDoneMsg{filename: item.Name, path: outPath}

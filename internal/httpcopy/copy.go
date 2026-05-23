@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dcorbell/s3m/internal/httpresolve"
+	"github.com/dcorbell/s3m/internal/progress"
 )
 
 // Progress is a snapshot of the copy operation delivered to Options.Progress.
@@ -149,26 +150,24 @@ func Run(ctx context.Context, up Uploader, opt Options) (key string, err error) 
 	}
 
 	// Wrap response body with a counting reader for progress callbacks.
-	cr := &countingReader{
-		r:     resp.Body,
-		total: bytesTotal,
-		key:   key,
-		onProgress: func(done int64) {
+	var onRead func(int64)
+	if opt.Progress != nil {
+		onRead = func(done int64) {
 			emit(Progress{
 				Phase:      "uploading",
 				BytesDone:  done,
 				BytesTotal: bytesTotal,
 				Filename:   key,
 			})
-		},
-		enabled: opt.Progress != nil,
+		}
 	}
+	cr := progress.NewReader(resp.Body, onRead)
 
 	if uploadErr := up.UploadStream(ctx, opt.Bucket, key, opt.Region, cr, partSize, opt.Concurrency); uploadErr != nil {
 		return "", fmt.Errorf("could not upload to s3://%s/%s: %w", opt.Bucket, key, uploadErr)
 	}
 
-	finalDone := cr.done
+	finalDone := cr.Done()
 	emit(Progress{
 		Phase:      "done",
 		BytesDone:  finalDone,
@@ -271,27 +270,4 @@ func ComputePartSize(contentLength int64) int64 {
 		return minPart
 	}
 	return computed
-}
-
-// countingReader wraps an io.Reader and calls onProgress after each Read.
-// It is deliberately goroutine-free and has no internal throttle; the caller
-// is responsible for rate-limiting its UI updates.
-type countingReader struct {
-	r          io.Reader
-	done       int64
-	total      int64
-	key        string
-	onProgress func(int64)
-	enabled    bool
-}
-
-func (c *countingReader) Read(p []byte) (n int, err error) {
-	n, err = c.r.Read(p)
-	if n > 0 {
-		c.done += int64(n)
-		if c.enabled {
-			c.onProgress(c.done)
-		}
-	}
-	return n, err
 }

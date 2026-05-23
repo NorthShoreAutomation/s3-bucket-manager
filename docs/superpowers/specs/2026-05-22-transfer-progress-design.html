@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en" data-product="watcher">
+<head>
+  <meta charset="utf-8">
+  <title>Transfer Progress — Design Spec</title>
+  <link rel="stylesheet" href="https://northshoreautomation.github.io/nsa-brand-design/dist/nsa.css">
+  <style>
+    body { padding: var(--s-8); max-width: 980px; margin: 0 auto; }
+    h1 { font-family: var(--font-display); font-style: italic; text-transform: uppercase; letter-spacing: .02em; margin-bottom: var(--s-2); }
+    h2 { font-family: var(--font-display); font-style: italic; text-transform: uppercase; letter-spacing: .02em; margin-top: var(--s-10); }
+    nav.toc { background: var(--surface, #111827); border: 1px solid var(--border, #1f2937); border-radius: var(--r-md); padding: var(--s-4) var(--s-6); margin: var(--s-6) 0; }
+    nav.toc ol { margin: 0; padding-left: var(--s-6); }
+    nav.toc a { color: var(--nsa-signal); text-decoration: none; }
+    nav.toc a:hover { text-decoration: underline; }
+    section { margin-top: var(--s-8); }
+    code, pre { font-family: var(--font-mono); }
+    pre { background: var(--surface, #111827); border: 1px solid var(--border, #1f2937); border-radius: var(--r-md); padding: var(--s-4); overflow-x: auto; }
+    .meta { font-family: var(--font-mono); color: var(--text-dim, #9ca3af); font-size: 0.9em; }
+    table { width: 100%; border-collapse: collapse; margin: var(--s-4) 0; }
+    th, td { padding: var(--s-2) var(--s-3); text-align: left; border-bottom: 1px solid var(--border, #1f2937); }
+    th { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: .04em; font-size: 0.8em; color: var(--text-dim, #9ca3af); }
+  </style>
+</head>
+<body>
+
+<h1>Transfer Progress for Upload &amp; Download</h1>
+<p class="meta">s3m · spec · 2026-05-22</p>
+
+<nav class="toc" aria-label="Table of contents">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#summary">Summary</a></li>
+    <li><a href="#current-state">Current state</a></li>
+    <li><a href="#goals">Goals &amp; non-goals</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#shared-package">Shared progress package</a></li>
+    <li><a href="#upload-flow">Upload flow</a></li>
+    <li><a href="#download-flow">Download flow</a></li>
+    <li><a href="#rendering">Rendering</a></li>
+    <li><a href="#cancel">Cancel behavior</a></li>
+    <li><a href="#testing">Testing</a></li>
+    <li><a href="#out-of-scope">Out of scope</a></li>
+  </ol>
+</nav>
+
+<section id="summary">
+  <h2>Summary</h2>
+  <p>Add a progress bar, transfer-rate readout, and percentage-complete line to the local-file upload (<code>p</code> key) and object download (<code>g</code> key) flows in the TUI browse view. Reuse the rendering and ticker pattern already in place for URL→S3 uploads (<code>internal/tui/urlupload.go</code>), and consolidate the supporting helpers into a small shared package so all three transfer paths share one implementation.</p>
+</section>
+
+<section id="current-state">
+  <h2>Current state</h2>
+  <ul>
+    <li><strong>URL→S3 upload</strong> (<code>internal/tui/urlupload.go</code>): already has a full progress UI — <code>bubbles/progress</code> bar, 250&nbsp;ms ticker, atomic snapshot, plus <code>formatRate</code> / <code>formatSize</code> / <code>formatDuration</code> helpers and an ETA. Fed by an <code>httpcopy.Progress</code> callback.</li>
+    <li><strong>Local file upload</strong> (<code>internal/tui/buckets.go:1685</code>): single-shot <code>UploadObject</code> with a static <code>"Uploading X…"</code> placeholder and a spinner. No byte-level feedback.</li>
+    <li><strong>Object download</strong> (<code>internal/tui/buckets.go:1820</code>): <code>DownloadObject</code> → <code>io.Copy</code>, static <code>"Downloading X…"</code> placeholder and spinner. Total size is not currently surfaced.</li>
+  </ul>
+</section>
+
+<section id="goals">
+  <h2>Goals &amp; non-goals</h2>
+  <p><strong>Goals.</strong> Bring upload and download to UX parity with URL upload: a visible bar, percentage complete, current rate, ETA when total is known. Single shared rendering path. Esc cancels an in-flight transfer cleanly.</p>
+  <p><strong>Non-goals.</strong> Switching upload to multipart (<code>UploadStream</code>). Folder-level aggregate progress. Anything outside the browse view's <code>p</code> and <code>g</code> keypaths.</p>
+</section>
+
+<section id="architecture">
+  <h2>Architecture</h2>
+  <p>Three components:</p>
+  <ol>
+    <li>A new shared package <code>internal/progress</code> holding the counting reader, the atomic snapshot type, and the formatting helpers.</li>
+    <li>Extensions to <code>bucketsModel</code> in <code>internal/tui/buckets.go</code> to hold transfer state (bar, snapshot, rate, label, cancel func) and to handle a 250&nbsp;ms tick message.</li>
+    <li>Minimal changes to <code>internal/aws/s3.go</code>: <code>DownloadObject</code>'s signature grows to also return the object's size.</li>
+  </ol>
+</section>
+
+<section id="shared-package">
+  <h2>Shared progress package</h2>
+  <p>New package <code>internal/progress</code>:</p>
+  <pre><code>package progress
+
+type Snapshot struct {
+    Done  int64
+    Total int64 // -1 when unknown
+}
+
+// Reader wraps an io.Reader and reports the running byte count after each Read.
+type Reader struct { /* … */ }
+func NewReader(r io.Reader, onProgress func(done int64)) *Reader
+
+// Helpers (moved from internal/tui/urlupload.go)
+func FormatRate(bps float64) string
+func FormatSize(n int64) string
+func FormatDuration(d time.Duration) string
+func ParseRateBytesPerSec(s string) float64
+</code></pre>
+  <p>The existing <code>countingReader</code> in <code>internal/httpcopy/copy.go</code> is replaced by <code>progress.Reader</code> (no behavior change). <code>urlupload.go</code> is updated to import the formatters from the new package; its local copies are deleted.</p>
+</section>
+
+<section id="upload-flow">
+  <h2>Upload flow</h2>
+  <p>When the user selects a file via the file picker:</p>
+  <ol>
+    <li>Set <code>m.transferLabel = "Uploading " + filename</code>.</li>
+    <li><code>os.Stat</code> the selected path to capture total bytes; store on the model as <code>transferTotal</code>.</li>
+    <li><code>os.Open</code> the file, then wrap in <code>progress.NewReader</code> whose callback stores a fresh <code>*progress.Snapshot</code> into an <code>atomic.Pointer[progress.Snapshot]</code> on the model.</li>
+    <li>Call <code>m.client.UploadObject(ctx, bucket, key, region, wrappedReader)</code> from the goroutine.</li>
+    <li>Return <code>uploadDoneMsg</code> on success, <code>errMsg</code> on failure (cancel returns <code>errMsg</code> with <code>context.Canceled</code>; see <a href="#cancel">Cancel</a>).</li>
+  </ol>
+  <p>The 250&nbsp;ms ticker reads the snapshot, recomputes <code>transferRate</code> (delta-bytes ÷ delta-time), and calls <code>m.transferBar.SetPercent(done/total)</code>.</p>
+</section>
+
+<section id="download-flow">
+  <h2>Download flow</h2>
+  <p><code>DownloadObject</code> currently returns <code>(io.ReadCloser, error)</code> and discards the <code>GetObject</code> response's <code>Content-Length</code>. It has a single caller (<code>buckets.go</code>), so widen the signature:</p>
+  <pre><code>func (c *Client) DownloadObject(
+    ctx context.Context, bucket, key, region string,
+) (io.ReadCloser, int64, error)
+</code></pre>
+  <p>The new <code>int64</code> is the object size from <code>output.ContentLength</code> (or <code>-1</code> when missing). The caller sets <code>m.transferLabel = "Downloading " + item.Name</code>, then wraps <code>body</code> in <code>progress.NewReader</code> before <code>io.Copy</code> to the destination file. Snapshot updates and ticker behavior mirror the upload flow.</p>
+</section>
+
+<section id="rendering">
+  <h2>Rendering</h2>
+  <p>While <code>m.transferSnap != nil</code>, the browse view's existing one-line <code>deleteProgress</code> slot is replaced by two lines plus the label:</p>
+  <pre>  Uploading photo.jpg
+  ████████████░░░░░░░░░░░░░░░░░░
+  12.4 MB / 50.0 MB (25%) — 8.3 MB/s — ETA 4s</pre>
+  <p>Unknown-total fallback (defensive only; shouldn't occur for these flows): <code>12.4 MB — 8.3 MB/s</code>.</p>
+  <p>The rest of the browse list remains visible above; the help row remains at the bottom but is replaced with <code>[esc] cancel</code> while a transfer is active.</p>
+</section>
+
+<section id="cancel">
+  <h2>Cancel behavior</h2>
+  <p>The transfer goroutine is launched with a <code>context.WithCancel</code> whose <code>cancel</code> func is stored on the model as <code>transferCancel</code>. Pressing <code>esc</code> during a transfer:</p>
+  <ol>
+    <li>Calls <code>m.transferCancel()</code>.</li>
+    <li>The in-flight <code>PutObject</code> / <code>GetObject</code> unwinds with <code>context.Canceled</code>.</li>
+    <li>The goroutine returns <code>errMsg{err: ctx.Err()}</code>.</li>
+    <li>The update function detects <code>errors.Is(err, context.Canceled)</code> and shows <code>"Cancelled"</code> instead of an error.</li>
+  </ol>
+  <p><code>ctrl+c</code> retains its existing global meaning (quit the app).</p>
+</section>
+
+<section id="testing">
+  <h2>Testing</h2>
+  <ul>
+    <li><strong><code>internal/progress</code> unit tests.</strong> Verify <code>Reader</code> reports byte count correctly across multiple reads; verify nil callback is safe; verify <code>FormatRate</code>/<code>FormatSize</code>/<code>FormatDuration</code> edge cases (0, negative, sub-KB, multi-GB). Port any existing relevant tests from <code>urlupload_test.go</code> if present.</li>
+    <li><strong><code>internal/httpcopy</code> regression.</strong> Existing tests must still pass after swapping <code>countingReader</code> for <code>progress.Reader</code>.</li>
+    <li><strong>No new TUI integration test.</strong> The upload/download keypaths already work; this change is additive rendering and a widened return signature.</li>
+  </ul>
+</section>
+
+<section id="out-of-scope">
+  <h2>Out of scope</h2>
+  <ul>
+    <li>Switching local upload to multipart via <code>UploadStream</code> — track as a follow-up GitHub issue.</li>
+    <li>Folder-level aggregate progress — no folder upload/download flow exists today.</li>
+    <li>Changes to the URL-upload modal — that flow already has full progress and is only edited to import the moved helpers.</li>
+  </ul>
+</section>
+
+</body>
+</html>

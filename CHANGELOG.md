@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- Empty bucket detail view no longer leaves the user stuck. `[n]` New folder, `[p]` Upload, and `[U]` URL upload now work directly from the bucket-detail / prefix-list view and target the bucket root, and are advertised in the footer help. Previously these keys were only wired up inside the browse view, so a freshly created bucket had no path to add content other than first adding a "prefix".
+
+### Added
+- Progress bar, transfer rate, percentage complete, and ETA for local-file uploads (`[p]`) and object downloads (`[g]`) in the TUI browse view.
+- `[esc]` cancels an in-flight upload or download.
+- New `internal/progress` package providing a shared counting `io.Reader` and rate/duration formatters reused by URL upload, local upload, download, and the HTTP-copy path.
+
+### Changed
+- `aws.Client.DownloadObject` now also returns the object's size, enabling percentage and ETA display during downloads.
+- Local file upload (`[p]`) now uses multipart upload (`UploadStream`) instead of single-shot `PutObject`. This both supports large files (>5 GiB) and fixes an HTTP 411 (Length Required) regression from wrapping `*os.File` in the new `progress.Reader`, which masked the file's seekability that `PutObject` relied on for `Content-Length`.
+
 ### Added
 - Create a new folder while browsing inside a bucket — press `[n]` in the file browser to enter a folder name, then auto-navigate into it so files can be uploaded immediately.
 
