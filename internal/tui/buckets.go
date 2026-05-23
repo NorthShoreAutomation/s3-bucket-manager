@@ -720,8 +720,10 @@ func (m bucketsModel) prefixIndex() int {
 }
 
 func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
-	// When browsing inside a prefix, delegate to browse handler
-	if m.browsePrefix != "" || len(m.browseItems) > 0 {
+	// When browsing, picking a local file, or showing transfer progress,
+	// delegate to the browse handler. Root-level uploads have no browse prefix
+	// or items, but they still need the picker and cancel keys handled there.
+	if m.showFilePicker || m.transferSnap != nil || m.browsePrefix != "" || len(m.browseItems) > 0 {
 		return m.updateBrowse(msg)
 	}
 
@@ -1663,6 +1665,12 @@ func (m bucketsModel) viewDetail() string {
 		}
 	} else {
 		// Prefix list
+		if tp := m.renderTransferProgress(); tp != "" {
+			s += "\n" + tp
+			s += helpStyle.Render("  [esc] cancel")
+			return s
+		}
+
 		if len(m.prefixes) > 0 {
 			s += "  " + labelStyle.Render("Prefixes:") + "  " + dimStyle.Render("[→ to browse]") + "\n"
 			s += "  " + lipgloss.NewStyle().Foreground(colorBorder).Render(strings.Repeat("─", 40)) + "\n"

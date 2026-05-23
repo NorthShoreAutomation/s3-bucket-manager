@@ -110,6 +110,53 @@ func TestBrowseKeysIgnoredDuringTransferExceptCancel(t *testing.T) {
 	}
 }
 
+func TestRootFilePickerKeysRouteThroughDetail(t *testing.T) {
+	m := bucketsModel{
+		items:          []bucketItem{{name: "bucket-a"}},
+		mode:           bucketDetail,
+		showFilePicker: true,
+		filePicker: filePickerModel{
+			items: []localFileItem{{name: "file.txt"}},
+		},
+	}
+
+	updated, cmd := m.updateDetail(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("expected root picker escape not to start a command")
+	}
+	if updated.showFilePicker {
+		t.Fatal("expected escape to close the root file picker")
+	}
+	if updated.mode != bucketDetail {
+		t.Fatalf("expected to remain in bucket detail, got mode %v", updated.mode)
+	}
+}
+
+func TestRootTransferCancelRoutesThroughDetail(t *testing.T) {
+	snap := &atomic.Pointer[progress.Snapshot]{}
+	snap.Store(&progress.Snapshot{Done: 1, Total: 10})
+	cancelled := false
+	m := bucketsModel{
+		items:        []bucketItem{{name: "bucket-a"}},
+		mode:         bucketDetail,
+		transferSnap: snap,
+		transferCancel: func() {
+			cancelled = true
+		},
+	}
+
+	updated, cmd := m.updateDetail(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("expected root transfer escape not to start a command")
+	}
+	if !cancelled {
+		t.Fatal("expected escape to cancel the root transfer")
+	}
+	if updated.mode != bucketDetail {
+		t.Fatalf("expected to remain in bucket detail, got mode %v", updated.mode)
+	}
+}
+
 func TestUsersIgnoreStaleUserAccessLoadedMsg(t *testing.T) {
 	m := usersModel{
 		mode:          usersDetail,
