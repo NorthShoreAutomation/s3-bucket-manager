@@ -862,6 +862,33 @@ func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.prefixInput.SetValue("")
 		m.prefixInput.Focus()
 		return m, textinput.Blink
+	case "n":
+		// Create a new folder at the bucket root. Uses the same flow as
+		// the browse view's "new folder" so the user drops into the new
+		// folder immediately and can upload from there.
+		m.browsePrefix = ""
+		m.mode = bucketDetailAddFolder
+		m.prefixInput.SetValue("")
+		m.prefixInput.Focus()
+		return m, textinput.Blink
+	case "p":
+		// Upload a local file to the bucket root.
+		m.browsePrefix = ""
+		fp := newFilePicker()
+		fp.width = m.width
+		fp.height = m.height
+		fp = fp.loadDir()
+		m.filePicker = fp
+		m.showFilePicker = true
+		return m, nil
+	case "U":
+		// Upload from a URL to the bucket root.
+		m.browsePrefix = ""
+		bucket := m.items[m.cursor]
+		um := newURLUpload(m.client, bucket.name, bucket.region, m.browsePrefix)
+		um.width = m.width
+		m.urlUpload = &um
+		return m, m.urlUpload.Init()
 	case "r":
 		m.loading = true
 		m.detailMessage = ""
@@ -1618,7 +1645,11 @@ func (m bucketsModel) viewDetail() string {
 
 		// New folder name overlay
 		if m.mode == bucketDetailAddFolder {
-			s += "\n  New folder name (created inside " + m.browsePrefix + "):\n"
+			parent := m.browsePrefix
+			if parent == "" {
+				parent = "bucket root"
+			}
+			s += "\n  New folder name (created inside " + parent + "):\n"
 			s += "  " + m.prefixInput.View() + "\n\n"
 			s += helpStyle.Render("  enter: create  esc: cancel")
 			return s
@@ -1661,6 +1692,11 @@ func (m bucketsModel) viewDetail() string {
 			s += "  " + m.prefixInput.View() + "\n\n"
 			s += helpStyle.Render("  enter: add  esc: cancel")
 			return s
+		case bucketDetailAddFolder:
+			s += "\n  New folder name (created at bucket root):\n"
+			s += "  " + m.prefixInput.View() + "\n\n"
+			s += helpStyle.Render("  enter: create  esc: cancel")
+			return s
 		case bucketDetailConfirm:
 			s += "\n"
 			s += "  " + warningStyle.Render(m.confirmAction) + "\n"
@@ -1673,11 +1709,11 @@ func (m bucketsModel) viewDetail() string {
 		// Context-sensitive help bar
 		switch m.cursorSection() {
 		case "bucket":
-			s += "\n" + helpStyle.Render("  [enter] Toggle public/private  [a] Add user  [r] Refresh  [esc] Back")
+			s += "\n" + helpStyle.Render("  [enter] Toggle public/private  [a] Add user  [n] New folder  [p] Upload  [U] URL upload  [r] Refresh  [esc] Back")
 		case "users":
-			s += "\n" + helpStyle.Render("  [enter] Cycle permission  [a] Add user  [d] Remove  [r] Refresh  [esc] Back")
+			s += "\n" + helpStyle.Render("  [enter] Cycle permission  [a] Add user  [d] Remove  [n] New folder  [p] Upload  [r] Refresh  [esc] Back")
 		case "prefixes":
-			s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [c] Add prefix  [d] Delete prefix  [r] Refresh  [←] Back")
+			s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [c] Add prefix  [n] New folder  [p] Upload  [d] Delete prefix  [r] Refresh  [←] Back")
 		}
 	}
 	return s
