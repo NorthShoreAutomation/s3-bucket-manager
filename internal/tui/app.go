@@ -93,7 +93,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case errMsg:
-		if !(a.screen == screenBuckets && a.buckets.transferSnap != nil && errors.Is(msg.err, context.Canceled)) {
+		if a.screen != screenBuckets || a.buckets.transferSnap == nil || !errors.Is(msg.err, context.Canceled) {
 			a.err = msg.err
 		}
 		hadErr = true
