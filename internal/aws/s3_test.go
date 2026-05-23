@@ -29,6 +29,7 @@ type mockS3 struct {
 	getPublicAccessBlockErr    error
 	putPublicAccessBlockErr    error
 	putObjectErr               error
+	putObjectContentLength     *int64
 	listObjectsV2Output        *s3.ListObjectsV2Output
 	getBucketPolicyOutput      *s3.GetBucketPolicyOutput
 	getBucketPolicyErr         error
@@ -63,6 +64,7 @@ func (m *mockS3) HeadBucket(ctx context.Context, params *s3.HeadBucketInput, opt
 }
 
 func (m *mockS3) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	m.putObjectContentLength = params.ContentLength
 	return &s3.PutObjectOutput{}, m.putObjectErr
 }
 
@@ -155,6 +157,23 @@ func TestUploadStream(t *testing.T) {
 	}
 	if mock.completeMultipartKey != key {
 		t.Errorf("expected CompleteMultipartUpload key %q, got %q", key, mock.completeMultipartKey)
+	}
+}
+
+func TestUploadObjectSizedSetsContentLength(t *testing.T) {
+	const size int64 = 1234
+	mock := &mockS3{}
+	client := &Client{S3: mock, Region: "us-east-1"}
+
+	if err := client.UploadObjectSized(context.Background(), "test-bucket", "file.txt", "us-west-2", bytes.NewReader(make([]byte, size)), size); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if mock.putObjectContentLength == nil {
+		t.Fatal("expected ContentLength to be set")
+	}
+	if got := *mock.putObjectContentLength; got != size {
+		t.Fatalf("ContentLength = %d, want %d", got, size)
 	}
 }
 

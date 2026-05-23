@@ -1865,7 +1865,7 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				})
 
 				key := prefix + filename
-				if err := m.client.UploadStream(ctx, bucket.name, key, bucket.region, reader, 0, 0); err != nil {
+				if err := m.client.UploadObjectSized(ctx, bucket.name, key, bucket.region, reader, totalSize); err != nil {
 					return errMsg{err: err}
 				}
 				return uploadDoneMsg{filename: filename}

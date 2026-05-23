@@ -533,16 +533,26 @@ func (c *Client) DownloadObject(ctx context.Context, bucket, key, region string)
 
 // UploadObject uploads a file to S3 at the given key.
 func (c *Client) UploadObject(ctx context.Context, bucket, key, region string, body io.Reader) error {
+	return c.UploadObjectSized(ctx, bucket, key, region, body, -1)
+}
+
+// UploadObjectSized uploads a file to S3 at the given key, setting
+// Content-Length when size is known.
+func (c *Client) UploadObjectSized(ctx context.Context, bucket, key, region string, body io.Reader, size int64) error {
 	opts := func(o *s3.Options) {
 		if region != "" {
 			o.Region = region
 		}
 	}
-	_, err := c.S3.PutObject(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 		Body:   body,
-	}, opts)
+	}
+	if size >= 0 {
+		input.ContentLength = aws.Int64(size)
+	}
+	_, err := c.S3.PutObject(ctx, input, opts)
 	if err != nil {
 		return fmt.Errorf("could not upload %q: %w", key, err)
 	}
