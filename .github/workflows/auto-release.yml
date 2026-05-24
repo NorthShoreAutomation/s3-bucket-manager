@@ -18,6 +18,10 @@ concurrency:
 
 permissions:
   contents: write
+  # Needed so `gh workflow run release.yml` can dispatch the Release workflow
+  # after we push the new tag. (GITHUB_TOKEN cannot trigger workflows via tag
+  # push, but workflow_dispatch from GITHUB_TOKEN is allowed.)
+  actions: write
 
 jobs:
   release:
@@ -236,6 +240,19 @@ jobs:
           git tag -a "${NEW_TAG}" -F /tmp/tag_message.txt
           git push origin "${NEW_TAG}"
           echo "Created and pushed tag: ${NEW_TAG}"
+
+      - name: Trigger Release workflow
+        if: steps.check.outputs.should_release == 'true' && github.event.inputs.dry_run != 'true' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_TAG="v${{ steps.version.outputs.new_version }}"
+          # A tag push made with GITHUB_TOKEN does NOT trigger workflows (GitHub's
+          # anti-recursion rule), so dispatch release.yml explicitly. We dispatch
+          # from main so the workflow file with the workflow_dispatch trigger is
+          # the one that runs, and pass the tag as an input.
+          gh workflow run release.yml --ref main -f tag="${NEW_TAG}"
+          echo "Dispatched Release workflow for ${NEW_TAG}"
 
       - name: Summary
         run: |

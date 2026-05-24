@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.6.0). Used by auto-release.yml to chain into this workflow, and for manual backfills of releases whose tag-push never triggered this workflow."
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,9 +19,26 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve tag
+        id: resolve
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ -z "$TAG" || "$TAG" != v* ]]; then
+            echo "Resolved tag '$TAG' is not a valid v* tag" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Releasing tag: ${TAG}"
+
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          ref: ${{ steps.resolve.outputs.tag }}
           fetch-depth: 0
 
       - name: Set up Go
@@ -27,7 +50,7 @@ jobs:
       - name: Extract release notes from CHANGELOG or tag annotation
         id: release_notes
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          VERSION="${{ steps.resolve.outputs.version }}"
           # Extract the section for this version from CHANGELOG.md
           # Matches from "## [VERSION]" to the next "## [" heading
           awk '/^## \['"${VERSION}"'\]/{found=1; next} /^## \[/{if(found) exit} found{print}' CHANGELOG.md > /tmp/release_notes.md
