@@ -36,7 +36,7 @@ jobs:
           echo "Releasing tag: ${TAG}"
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.resolve.outputs.tag }}
           fetch-depth: 0
