@@ -21,6 +21,46 @@ type stubS3ForBucketInit struct {
 	region string
 }
 
+type stubS3ForBulkDelete struct {
+	awsClient.S3API
+	directDeletes []string
+	bulkDeletes   []string
+	updatedPolicy string
+}
+
+func (s *stubS3ForBulkDelete) GetBucketPolicy(_ context.Context, _ *s3.GetBucketPolicyInput, _ ...func(*s3.Options)) (*s3.GetBucketPolicyOutput, error) {
+	return &s3.GetBucketPolicyOutput{Policy: ptr(`{"Version":"2012-10-17","Statement":[{"Sid":"s3m-public-folder","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket-a/folder/*"},{"Sid":"unrelated","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket-a/other/*"}]}`)}, nil
+}
+
+func (s *stubS3ForBulkDelete) PutBucketPolicy(_ context.Context, input *s3.PutBucketPolicyInput, _ ...func(*s3.Options)) (*s3.PutBucketPolicyOutput, error) {
+	s.updatedPolicy = *input.Policy
+	return &s3.PutBucketPolicyOutput{}, nil
+}
+
+func (s *stubS3ForBulkDelete) DeleteObject(_ context.Context, input *s3.DeleteObjectInput, _ ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	s.directDeletes = append(s.directDeletes, *input.Key)
+	return &s3.DeleteObjectOutput{}, nil
+}
+
+func (s *stubS3ForBulkDelete) ListObjectsV2(_ context.Context, input *s3.ListObjectsV2Input, _ ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	if *input.Prefix != "folder/" {
+		return &s3.ListObjectsV2Output{}, nil
+	}
+	return &s3.ListObjectsV2Output{Contents: []s3types.Object{
+		{Key: ptr("folder/one.txt")},
+		{Key: ptr("folder/two.txt")},
+	}}, nil
+}
+
+func (s *stubS3ForBulkDelete) DeleteObjects(_ context.Context, input *s3.DeleteObjectsInput, _ ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error) {
+	for _, object := range input.Delete.Objects {
+		s.bulkDeletes = append(s.bulkDeletes, *object.Key)
+	}
+	return &s3.DeleteObjectsOutput{}, nil
+}
+
+func ptr(value string) *string { return &value }
+
 func (s *stubS3ForBucketInit) GetBucketLocation(ctx context.Context, params *s3.GetBucketLocationInput, optFns ...func(*s3.Options)) (*s3.GetBucketLocationOutput, error) {
 	return &s3.GetBucketLocationOutput{
 		LocationConstraint: s3types.BucketLocationConstraint(s.region),
@@ -107,6 +147,209 @@ func TestBrowseKeysIgnoredDuringTransferExceptCancel(t *testing.T) {
 	}
 	if !cancelled {
 		t.Fatal("expected esc to call transfer cancel")
+	}
+}
+
+func TestBrowseSpaceTogglesSelectionAndKeepsItWhileScrolling(t *testing.T) {
+	m := bucketsModel{
+		mode:   bucketDetail,
+		height: 8,
+		browseItems: []awsClient.BrowseItem{
+			{Name: "one.txt", Key: "one.txt"},
+			{Name: "two.txt", Key: "two.txt"},
+			{Name: "three.txt", Key: "three.txt"},
+		},
+	}
+
+	updated, _ := m.updateBrowse(tea.KeyMsg{Type: tea.KeySpace})
+	if !updated.browseSelected["one.txt"] {
+		t.Fatal("expected space to select the highlighted item")
+	}
+
+	updated, _ = updated.updateBrowse(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = updated.updateBrowse(tea.KeyMsg{Type: tea.KeySpace})
+	if !updated.browseSelected["one.txt"] || !updated.browseSelected["two.txt"] {
+		t.Fatalf("expected selections to survive scrolling, got %#v", updated.browseSelected)
+	}
+
+	updated, _ = updated.updateBrowse(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ = updated.updateBrowse(tea.KeyMsg{Type: tea.KeySpace})
+	if updated.browseSelected["one.txt"] {
+		t.Fatal("expected space to deselect an already selected item")
+	}
+}
+
+func TestBrowseSelectAllTogglesCurrentListing(t *testing.T) {
+	m := bucketsModel{browseItems: []awsClient.BrowseItem{
+		{Name: "folder/", Key: "folder/", IsFolder: true},
+		{Name: "file.txt", Key: "file.txt"},
+	}}
+
+	updated, _ := m.updateBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(updated.browseSelected) != 2 {
+		t.Fatalf("expected all items selected, got %#v", updated.browseSelected)
+	}
+
+	updated, _ = updated.updateBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(updated.browseSelected) != 0 {
+		t.Fatalf("expected select-all to clear a fully selected listing, got %#v", updated.browseSelected)
+	}
+
+	m.browseSelected = map[string]bool{"file.txt": true}
+	updated, _ = m.updateBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if len(updated.browseSelected) != 0 {
+		t.Fatalf("expected select-all to clear a partial selection, got %#v", updated.browseSelected)
+	}
+}
+
+func TestBrowseNavigationClearsSelection(t *testing.T) {
+	m := bucketsModel{
+		items:          []bucketItem{{name: "bucket-a"}},
+		browsePrefix:   "parent/",
+		browseItems:    []awsClient.BrowseItem{{Name: "child/", Key: "parent/child/", IsFolder: true}},
+		browseSelected: map[string]bool{"parent/child/": true},
+	}
+
+	updated, _ := m.updateBrowse(tea.KeyMsg{Type: tea.KeyRight})
+	if len(updated.browseSelected) != 0 {
+		t.Fatalf("expected entering a folder to clear selections, got %#v", updated.browseSelected)
+	}
+}
+
+func TestBrowseDeleteUsesOneBulkConfirmationForSelection(t *testing.T) {
+	m := newBucketsModel(nil)
+	m.items = []bucketItem{{name: "bucket-a"}}
+	m.browseItems = []awsClient.BrowseItem{
+		{Name: "folder/", Key: "folder/", IsFolder: true},
+		{Name: "file.txt", Key: "file.txt"},
+	}
+	m.browseSelected = map[string]bool{"folder/": true, "file.txt": true}
+
+	updated, _ := m.updateBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if updated.mode != bucketDetailDeleteSelection {
+		t.Fatalf("expected one bulk-delete confirmation mode, got %v", updated.mode)
+	}
+	if !strings.Contains(updated.confirmAction, "1 file and 1 folder") {
+		t.Fatalf("expected confirmation to summarize selection, got %q", updated.confirmAction)
+	}
+}
+
+func TestBrowseViewMarksSelectedRows(t *testing.T) {
+	m := bucketsModel{
+		items:          []bucketItem{{name: "bucket-a"}},
+		mode:           bucketDetail,
+		height:         20,
+		browseItems:    []awsClient.BrowseItem{{Name: "file.txt", Key: "file.txt"}},
+		browseSelected: map[string]bool{"file.txt": true},
+	}
+
+	view := m.viewDetail()
+	if !strings.Contains(view, "[x]") {
+		t.Fatalf("expected selected-row marker in browse view, got %q", view)
+	}
+}
+
+func TestBrowseBulkDeleteRunsFilesAndFoldersAfterOneConfirmation(t *testing.T) {
+	s3Client := &stubS3ForBulkDelete{}
+	m := newBucketsModel(&awsClient.Client{S3: s3Client})
+	m.items = []bucketItem{{name: "bucket-a", region: "us-west-2"}}
+	m.mode = bucketDetailDeleteSelection
+	m.browseItems = []awsClient.BrowseItem{
+		{Name: "folder/", Key: "folder/", IsFolder: true},
+		{Name: "file.txt", Key: "file.txt"},
+	}
+	m.browseSelected = map[string]bool{"folder/": true, "file.txt": true}
+	m.deleteInput.SetValue("delete")
+
+	updated, cmd := m.updateDeleteSelection(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected confirmed deletion to return one command")
+	}
+	msg := cmd()
+	done, ok := msg.(operationDoneMsg)
+	if !ok {
+		t.Fatalf("expected successful deletion message, got %#v", msg)
+	}
+	if done.message != "Deleted 3 objects across 2 selected items" {
+		t.Fatalf("expected total deleted-object and selection counts, got %q", done.message)
+	}
+	if !updated.loading {
+		t.Fatal("expected browse model to show loading while deletion runs")
+	}
+	if len(s3Client.bulkDeletes) != 3 || s3Client.bulkDeletes[0] != "file.txt" {
+		t.Fatalf("expected selected file and both folder objects to be batch deleted, got %#v", s3Client.bulkDeletes)
+	}
+	if strings.Contains(s3Client.updatedPolicy, "s3m-public-folder") || !strings.Contains(s3Client.updatedPolicy, "unrelated") {
+		t.Fatalf("expected deleted folder policy removed without disturbing other policy, got %q", s3Client.updatedPolicy)
+	}
+}
+
+func TestBulkDeleteProgressUpdatesAndClears(t *testing.T) {
+	m := bucketsModel{
+		items:          []bucketItem{{name: "bucket-a"}},
+		mode:           bucketDetail,
+		browseItems:    []awsClient.BrowseItem{{Name: "file.txt", Key: "file.txt"}},
+		deleteProgress: "Deleting selected items...",
+	}
+
+	updated, _ := m.update(selectionDeleteProgressMsg{deleted: 1200})
+	if updated.deleteProgress != "Deleting selected items... 1,200 objects removed" {
+		t.Fatalf("expected live bulk-delete progress, got %q", updated.deleteProgress)
+	}
+
+	updated, _ = updated.update(operationDoneMsg{message: "Deleted 1,200 objects"})
+	if updated.deleteProgress != "" {
+		t.Fatalf("expected completed operation to clear deletion progress, got %q", updated.deleteProgress)
+	}
+}
+
+func TestBulkDeleteCanBeCancelledAndRefreshesAfterFailure(t *testing.T) {
+	cancelled := false
+	m := bucketsModel{
+		client:           &awsClient.Client{},
+		items:            []bucketItem{{name: "bucket-a"}},
+		mode:             bucketDetail,
+		browseItems:      []awsClient.BrowseItem{{Name: "file.txt", Key: "file.txt"}},
+		browseSelected:   map[string]bool{"file.txt": true},
+		bulkDeleting:     true,
+		bulkDeleteCancel: func() { cancelled = true },
+	}
+
+	updated, cmd := m.updateBrowse(tea.KeyMsg{Type: tea.KeyEsc})
+	if !cancelled || cmd != nil || !updated.bulkDeleting {
+		t.Fatalf("expected escape to request cancellation without changing state early, cancelled=%v", cancelled)
+	}
+
+	updated, cmd = updated.update(errMsg{err: errors.New("delete failed")})
+	if cmd == nil || !updated.loading || updated.bulkDeleting || len(updated.browseSelected) != 0 {
+		t.Fatalf("expected failed bulk delete to clear selection and refresh, got %#v", updated)
+	}
+}
+
+func TestAppDoesNotRecordBulkDeleteCancellationAsGlobalError(t *testing.T) {
+	app := App{screen: screenBuckets, buckets: bucketsModel{
+		client:       &awsClient.Client{},
+		items:        []bucketItem{{name: "bucket-a"}},
+		browseItems:  []awsClient.BrowseItem{{Name: "file.txt", Key: "file.txt"}},
+		bulkDeleting: true,
+	}}
+
+	next, _ := app.Update(errMsg{err: context.Canceled})
+	if updated := next.(App); updated.err != nil {
+		t.Fatalf("expected bulk-delete cancellation not to become a global error, got %v", updated.err)
+	}
+}
+
+func TestAppCancelsBulkDeleteBeforeQuitting(t *testing.T) {
+	cancelled := false
+	app := App{screen: screenBuckets, buckets: bucketsModel{
+		bulkDeleting:     true,
+		bulkDeleteCancel: func() { cancelled = true },
+	}}
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if !cancelled || cmd == nil {
+		t.Fatalf("expected quit to cancel bulk delete before returning quit command, cancelled=%v", cancelled)
 	}
 }
 

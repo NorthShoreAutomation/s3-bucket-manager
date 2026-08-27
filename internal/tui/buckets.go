@@ -50,6 +50,7 @@ const (
 	bucketDetailAddFolder                     // typing a new folder name while browsing inside a prefix
 	bucketDetailConfirm                       // type 'yes' to confirm access change
 	bucketDetailDeleteFolder                  // type 'delete' to confirm folder deletion
+	bucketDetailDeleteSelection               // type 'delete' to confirm selected item deletion
 	bucketDetailPickUser                      // selecting a user to add
 	bucketDetailPickPerm                      // choosing permission level for new user
 	bucketDetailConfirmRemoveUser             // confirm removing user access
@@ -98,6 +99,7 @@ type bucketsModel struct {
 	browseItems        []awsClient.BrowseItem // folders + files at current prefix
 	browseCursor       int                    // cursor in browse view
 	browseOffset       int                    // scroll offset in browse view
+	browseSelected     map[string]bool        // selected keys in the current browse listing
 	folderDeleteKey    string                 // key of folder being deleted
 	folderDeleteCnt    int64                  // object count for folder delete confirm
 	folderDeletePublic bool                   // whether the folder being deleted also has public access
@@ -123,6 +125,8 @@ type bucketsModel struct {
 	transferLastTime time.Time
 	transferRate     float64
 	transferCancel   context.CancelFunc
+	bulkDeleteCancel context.CancelFunc
+	bulkDeleting     bool
 }
 
 func newBucketsModel(client *awsClient.Client) bucketsModel {
@@ -246,6 +250,17 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			m.detailMessage = "Cancelled"
 			return m, nil
 		}
+		if m.bulkDeleting {
+			m.bulkDeleting = false
+			m.bulkDeleteCancel = nil
+			m.browseSelected = nil
+			m.deleteProgress = ""
+			if errors.Is(msg.err, context.Canceled) {
+				m.detailMessage = "Bulk delete cancelled"
+			}
+			m.loading = true
+			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+		}
 		return m, nil
 
 	case bucketsLoadedMsg:
@@ -272,6 +287,9 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	case operationDoneMsg:
 		m.message = msg.message
 		m.detailMessage = msg.message
+		m.deleteProgress = ""
+		m.bulkDeleting = false
+		m.bulkDeleteCancel = nil
 		// If we were browsing files, reload the current directory
 		if m.browsePrefix != "" || len(m.browseItems) > 0 {
 			m.mode = bucketDetail
@@ -313,6 +331,7 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 
 	case browseLoadedMsg:
 		m.browseItems = msg.items
+		m.browseSelected = nil
 		m.loading = false
 		m.browseCursor = 0
 		m.browseOffset = 0
@@ -399,6 +418,10 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 
 	case folderDeleteProgressMsg:
 		m.deleteProgress = fmt.Sprintf("Deleting folder... %s objects removed", formatWithCommas(msg.deleted))
+		return m, nil
+
+	case selectionDeleteProgressMsg:
+		m.deleteProgress = fmt.Sprintf("Deleting selected items... %s objects removed", formatWithCommas(msg.deleted))
 		return m, nil
 
 	case downloadDoneMsg:
@@ -495,6 +518,8 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			return m.updateDetailConfirm(msg)
 		case bucketDetailDeleteFolder:
 			return m.updateDeleteFolder(msg)
+		case bucketDetailDeleteSelection:
+			return m.updateDeleteSelection(msg)
 		case bucketDetailPickUser:
 			return m.updateBucketDetailPickUser(msg)
 		case bucketDetailPickPerm:
@@ -1338,7 +1363,7 @@ func (m bucketsModel) renderTransferProgress() string {
 
 func (m bucketsModel) view() string {
 	switch m.mode {
-	case bucketDetail, bucketDetailAddPrefix, bucketDetailAddFolder, bucketDetailConfirm, bucketDetailDeleteFolder:
+	case bucketDetail, bucketDetailAddPrefix, bucketDetailAddFolder, bucketDetailConfirm, bucketDetailDeleteFolder, bucketDetailDeleteSelection:
 		return m.viewDetail()
 	case bucketDetailPickUser:
 		return m.viewPickUser()
@@ -1495,6 +1520,9 @@ func (m bucketsModel) viewDetail() string {
 	if m.loading {
 		if m.deleteProgress != "" {
 			s += fmt.Sprintf("\n %s %s\n", m.spinner.View(), m.deleteProgress)
+			if m.bulkDeleting {
+				s += helpStyle.Render(" [esc] Cancel")
+			}
 		} else {
 			s += fmt.Sprintf("\n %s Loading...\n", m.spinner.View())
 		}
@@ -1606,7 +1634,11 @@ func (m bucketsModel) viewDetail() string {
 						mod = item.LastModified.Format("2006-01-02 15:04")
 					}
 				}
-				display := icon + pad(name, 37)
+				marker := "[ ] "
+				if m.browseSelected[item.Key] {
+					marker = "[x] "
+				}
+				display := marker + icon + pad(name, 33)
 				row := fmt.Sprintf(" %s  %s  %s", display, padRight(sz, 10), pad(mod, 20))
 				if i == m.browseCursor {
 					s += rowSelectedStyle.Width(detailWidth).Render(row) + "\n"
@@ -1645,6 +1677,16 @@ func (m bucketsModel) viewDetail() string {
 			return s
 		}
 
+		if m.mode == bucketDetailDeleteSelection {
+			s += "\n"
+			s += "  " + warningStyle.Render(m.confirmAction) + "\n"
+			s += "  " + warningStyle.Render("Folders and everything inside them will be permanently deleted.") + "\n"
+			s += "  " + warningStyle.Render("Type 'delete' to continue:") + "\n"
+			s += "  " + m.deleteInput.View() + "\n\n"
+			s += helpStyle.Render("  enter: delete selected  esc: cancel")
+			return s
+		}
+
 		// New folder name overlay
 		if m.mode == bucketDetailAddFolder {
 			parent := m.browsePrefix
@@ -1661,7 +1703,7 @@ func (m bucketsModel) viewDetail() string {
 			s += "\n" + tp
 			s += helpStyle.Render("  [esc] cancel")
 		} else {
-			s += "\n" + helpStyle.Render("  [→] Open folder  [←] Back  [n] New folder  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [d] Delete  [r] Refresh  [esc] Prefix list")
+			s += "\n" + helpStyle.Render("  [space] Select  [a] Select all/clear  [d] Delete  [→] Open  [←] Back  [n] New folder  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [r] Refresh  [esc] Prefix list")
 		}
 	} else {
 		// Prefix list
@@ -1877,6 +1919,12 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	if m.transferSnap != nil && msg.String() != "esc" {
 		return m, nil
 	}
+	if m.bulkDeleting {
+		if msg.String() == "esc" && m.bulkDeleteCancel != nil {
+			m.bulkDeleteCancel()
+		}
+		return m, nil
+	}
 
 	switch msg.String() {
 	case "up", "k":
@@ -1915,11 +1963,13 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	case "right", "l":
 		// Drill into folder
 		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
+			m.browseSelected = nil
 			m.browsePrefix = m.browseItems[m.browseCursor].Key
 			m.loading = true
 			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 		}
 	case "left", "h":
+		m.browseSelected = nil
 		// Go up one level
 		trimmed := strings.TrimSuffix(m.browsePrefix, "/")
 		lastSlash := strings.LastIndex(trimmed, "/")
@@ -1938,6 +1988,7 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			return m, nil
 		}
 		// Esc always goes back to prefix list
+		m.browseSelected = nil
 		m.browsePrefix = ""
 		m.browseItems = nil
 		return m, nil
@@ -1945,6 +1996,27 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		// Enter toggles access on the current item if it's a folder
 		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
 			return m.toggleBrowseFolder()
+		}
+	case " ":
+		if m.browseCursor < len(m.browseItems) {
+			if m.browseSelected == nil {
+				m.browseSelected = make(map[string]bool)
+			}
+			key := m.browseItems[m.browseCursor].Key
+			if m.browseSelected[key] {
+				delete(m.browseSelected, key)
+			} else {
+				m.browseSelected[key] = true
+			}
+		}
+	case "a":
+		if len(m.browseSelected) > 0 {
+			m.browseSelected = nil
+		} else {
+			m.browseSelected = make(map[string]bool, len(m.browseItems))
+			for _, item := range m.browseItems {
+				m.browseSelected[item.Key] = true
+			}
 		}
 	case "c":
 		if m.browseCursor < len(m.browseItems) {
@@ -1959,6 +2031,14 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		}
 	case "d":
 		if m.browseCursor < len(m.browseItems) {
+			if len(m.browseSelected) > 0 {
+				files, folders := m.selectedBrowseCounts()
+				m.confirmAction = fmt.Sprintf("Delete %s?", describeBrowseSelection(files, folders))
+				m.mode = bucketDetailDeleteSelection
+				m.deleteInput.SetValue("")
+				m.deleteInput.Focus()
+				return m, textinput.Blink
+			}
 			item := m.browseItems[m.browseCursor]
 			bucket := m.items[m.cursor]
 			if item.IsFolder {
@@ -2066,10 +2146,135 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.urlUpload = &um
 		return m, m.urlUpload.Init()
 	case "r":
+		m.browseSelected = nil
 		m.loading = true
 		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 	}
 	return m, nil
+}
+
+func (m bucketsModel) selectedBrowseCounts() (files, folders int) {
+	for _, item := range m.browseItems {
+		if !m.browseSelected[item.Key] {
+			continue
+		}
+		if item.IsFolder {
+			folders++
+		} else {
+			files++
+		}
+	}
+	return files, folders
+}
+
+func describeBrowseSelection(files, folders int) string {
+	parts := make([]string, 0, 2)
+	if files > 0 {
+		parts = append(parts, fmt.Sprintf("%d file%s", files, pluralSuffix(files)))
+	}
+	if folders > 0 {
+		parts = append(parts, fmt.Sprintf("%d folder%s", folders, pluralSuffix(folders)))
+	}
+	return strings.Join(parts, " and ")
+}
+
+func pluralSuffix(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func (m bucketsModel) updateDeleteSelection(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		if strings.TrimSpace(m.deleteInput.Value()) != "delete" {
+			m.detailMessage = "You must type 'delete' to confirm. Cancelled."
+			m.mode = bucketDetail
+			return m, nil
+		}
+
+		if m.cursor < 0 || m.cursor >= len(m.items) {
+			m.mode = bucketDetail
+			m.detailMessage = "Delete cancelled: bucket is no longer available"
+			return m, nil
+		}
+		bucket := m.items[m.cursor]
+		selected := make([]awsClient.BrowseItem, 0, len(m.browseSelected))
+		for _, item := range m.browseItems {
+			if m.browseSelected[item.Key] {
+				selected = append(selected, item)
+			}
+		}
+		if len(selected) == 0 {
+			m.mode = bucketDetail
+			m.browseSelected = nil
+			m.detailMessage = "Delete cancelled: selection is no longer available"
+			return m, nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		m.loading = true
+		m.mode = bucketDetail
+		m.deleteProgress = "Deleting selected items..."
+		m.bulkDeleting = true
+		m.bulkDeleteCancel = cancel
+		return m, func() tea.Msg {
+			var deleted int64
+			fileKeys := make([]string, 0, len(selected))
+			folderKeys := make([]string, 0, len(selected))
+			for _, item := range selected {
+				if item.IsFolder {
+					folderKeys = append(folderKeys, item.Key)
+				} else {
+					fileKeys = append(fileKeys, item.Key)
+				}
+			}
+			fileDeleted, err := m.client.DeleteObjectKeys(ctx, bucket.name, fileKeys, bucket.region, func(count int64) {
+				if prog != nil {
+					prog.Send(selectionDeleteProgressMsg{deleted: count})
+				}
+			})
+			if err != nil {
+				return errMsg{err: err}
+			}
+			deleted = fileDeleted
+			deletedFolders := make([]string, 0, len(folderKeys))
+			for _, folderKey := range folderKeys {
+				before := deleted
+				if err := m.client.DeletePrefix(ctx, bucket.name, folderKey, bucket.region, func(folderDeleted int64) {
+					deleted = before + folderDeleted
+					if prog != nil {
+						prog.Send(selectionDeleteProgressMsg{deleted: deleted})
+					}
+				}); err != nil {
+					if len(deletedFolders) > 0 {
+						cleanupCtx := context.WithoutCancel(ctx)
+						if cleanupErr := m.client.SetPrefixesPrivate(cleanupCtx, bucket.name, deletedFolders, bucket.region); cleanupErr != nil {
+							return errMsg{err: fmt.Errorf("%v; public-access cleanup also failed: %w", err, cleanupErr)}
+						}
+					}
+					return errMsg{err: err}
+				}
+				deletedFolders = append(deletedFolders, folderKey)
+			}
+			if len(deletedFolders) > 0 {
+				if err := m.client.SetPrefixesPrivate(ctx, bucket.name, deletedFolders, bucket.region); err != nil {
+					return errMsg{err: err}
+				}
+			}
+			return operationDoneMsg{message: fmt.Sprintf(
+				"Deleted %s objects across %s selected items",
+				formatWithCommas(deleted), formatWithCommas(int64(len(selected))),
+			)}
+		}
+	case "esc":
+		m.mode = bucketDetail
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.deleteInput, cmd = m.deleteInput.Update(msg)
+		return m, cmd
+	}
 }
 
 func (m bucketsModel) toggleBrowseFolder() (bucketsModel, tea.Cmd) {
