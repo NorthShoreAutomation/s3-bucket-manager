@@ -3,6 +3,8 @@ package aws
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,7 +36,10 @@ type mockS3 struct {
 	getBucketPolicyOutput      *s3.GetBucketPolicyOutput
 	getBucketPolicyErr         error
 	putBucketPolicyErr         error
+	putBucketPolicyCalls       int
 	deleteBucketPolicyErr      error
+	deleteObjectBatches        [][]string
+	deleteObjectsOutput        *s3.DeleteObjectsOutput
 
 	// multipart tracking for TestUploadStream
 	createMultipartCalled   atomic.Int32
@@ -89,11 +94,24 @@ func (m *mockS3) GetBucketPolicy(ctx context.Context, params *s3.GetBucketPolicy
 }
 
 func (m *mockS3) PutBucketPolicy(ctx context.Context, params *s3.PutBucketPolicyInput, optFns ...func(*s3.Options)) (*s3.PutBucketPolicyOutput, error) {
+	m.putBucketPolicyCalls++
 	return nil, m.putBucketPolicyErr
 }
 
 func (m *mockS3) DeleteBucketPolicy(ctx context.Context, params *s3.DeleteBucketPolicyInput, optFns ...func(*s3.Options)) (*s3.DeleteBucketPolicyOutput, error) {
 	return nil, m.deleteBucketPolicyErr
+}
+
+func (m *mockS3) DeleteObjects(_ context.Context, input *s3.DeleteObjectsInput, _ ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error) {
+	keys := make([]string, 0, len(input.Delete.Objects))
+	for _, object := range input.Delete.Objects {
+		keys = append(keys, aws.ToString(object.Key))
+	}
+	m.deleteObjectBatches = append(m.deleteObjectBatches, keys)
+	if m.deleteObjectsOutput != nil {
+		return m.deleteObjectsOutput, nil
+	}
+	return &s3.DeleteObjectsOutput{}, nil
 }
 
 func (m *mockS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
@@ -126,6 +144,86 @@ func (m *mockS3) CompleteMultipartUpload(ctx context.Context, params *s3.Complet
 
 func (m *mockS3) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
 	return &s3.AbortMultipartUploadOutput{}, nil
+}
+
+func TestSetPrefixPrivateDoesNotRewritePolicyWithoutMatchingStatement(t *testing.T) {
+	mock := &mockS3{getBucketPolicyOutput: &s3.GetBucketPolicyOutput{Policy: aws.String(`{
+		"Version":"2012-10-17",
+		"Statement":[{
+			"Sid":"unrelated",
+			"Effect":"Allow",
+			"Principal":"*",
+			"Action":"s3:GetObject",
+			"Resource":"arn:aws:s3:::bucket-a/other/*"
+		}]
+	}`)}}
+	client := &Client{S3: mock}
+
+	if err := client.SetPrefixPrivate(context.Background(), "bucket-a", "private-folder/", "us-west-2"); err != nil {
+		t.Fatalf("expected already-private prefix cleanup to succeed, got %v", err)
+	}
+	if mock.putBucketPolicyCalls != 0 {
+		t.Fatalf("expected unrelated bucket policy not to be rewritten, got %d writes", mock.putBucketPolicyCalls)
+	}
+}
+
+func TestSetPrefixesPrivatePropagatesPolicyReadFailure(t *testing.T) {
+	mock := &mockS3{getBucketPolicyErr: fmt.Errorf("access denied")}
+	client := &Client{S3: mock}
+
+	err := client.SetPrefixesPrivate(context.Background(), "bucket-a", []string{"folder/"}, "us-west-2")
+	if err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("expected bucket-policy read failure to propagate, got %v", err)
+	}
+}
+
+func TestListContentsOmitsObjectThatDuplicatesFolderPrefix(t *testing.T) {
+	mock := &mockS3{listObjectsV2Output: &s3.ListObjectsV2Output{
+		CommonPrefixes: []s3types.CommonPrefix{{Prefix: aws.String("parent/folder/")}},
+		Contents: []s3types.Object{
+			{Key: aws.String("parent/folder/"), Size: aws.Int64(0)},
+			{Key: aws.String("parent/file.txt"), Size: aws.Int64(10)},
+		},
+	}}
+	client := &Client{S3: mock}
+
+	items, err := client.ListContents(context.Background(), "bucket-a", "parent/", "us-west-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || !items[0].IsFolder || items[0].Key != "parent/folder/" || items[1].Key != "parent/file.txt" {
+		t.Fatalf("expected one folder and one file without duplicate marker, got %#v", items)
+	}
+}
+
+func TestDeleteObjectKeysBatchesAtS3Limit(t *testing.T) {
+	mock := &mockS3{}
+	client := &Client{S3: mock}
+	keys := make([]string, 1001)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("file-%d", i)
+	}
+
+	deleted, err := client.DeleteObjectKeys(context.Background(), "bucket-a", keys, "us-west-2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1001 || len(mock.deleteObjectBatches) != 2 || len(mock.deleteObjectBatches[0]) != 1000 || len(mock.deleteObjectBatches[1]) != 1 {
+		t.Fatalf("expected 1000/1 batched deletion, deleted=%d batches=%#v", deleted, mock.deleteObjectBatches)
+	}
+}
+
+func TestDeletePrefixReturnsPerObjectDeleteErrors(t *testing.T) {
+	mock := &mockS3{
+		listObjectsV2Output: &s3.ListObjectsV2Output{Contents: []s3types.Object{{Key: aws.String("folder/blocked.txt")}}},
+		deleteObjectsOutput: &s3.DeleteObjectsOutput{Errors: []s3types.Error{{Key: aws.String("folder/blocked.txt"), Message: aws.String("access denied")}}},
+	}
+	client := &Client{S3: mock}
+
+	err := client.DeletePrefix(context.Background(), "bucket-a", "folder/", "us-west-2", nil)
+	if err == nil || !strings.Contains(err.Error(), "blocked.txt") {
+		t.Fatalf("expected per-object delete error, got %v", err)
+	}
 }
 
 func TestUploadStream(t *testing.T) {

@@ -158,6 +158,38 @@ func (c *Client) DeleteObject(ctx context.Context, bucket, key, region string) e
 	return nil
 }
 
+// DeleteObjectKeys deletes object keys in batches of up to S3's 1,000-key limit.
+func (c *Client) DeleteObjectKeys(ctx context.Context, bucket string, keys []string, region string, onProgress func(deleted int64)) (int64, error) {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+	var deleted int64
+	for start := 0; start < len(keys); start += 1000 {
+		end := min(start+1000, len(keys))
+		objects := make([]s3types.ObjectIdentifier, 0, end-start)
+		for _, key := range keys[start:end] {
+			objects = append(objects, s3types.ObjectIdentifier{Key: aws.String(key)})
+		}
+		output, err := c.S3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &s3types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+		}, opts)
+		if err != nil {
+			return deleted, fmt.Errorf("could not delete selected objects: %w", err)
+		}
+		if len(output.Errors) > 0 {
+			return deleted, fmt.Errorf("could not delete %q: %s", aws.ToString(output.Errors[0].Key), aws.ToString(output.Errors[0].Message))
+		}
+		deleted += int64(len(objects))
+		if onProgress != nil {
+			onProgress(deleted)
+		}
+	}
+	return deleted, nil
+}
+
 // CountObjects counts all objects under a given prefix (paginated, real-time).
 func (c *Client) CountObjects(ctx context.Context, bucket, prefix, region string) (int64, error) {
 	opts := func(o *s3.Options) {
@@ -210,12 +242,15 @@ func (c *Client) DeletePrefix(ctx context.Context, bucket, prefix, region string
 		for _, obj := range output.Contents {
 			objects = append(objects, s3types.ObjectIdentifier{Key: obj.Key})
 		}
-		_, err = c.S3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		deleteOutput, err := c.S3.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(bucket),
 			Delete: &s3types.Delete{Objects: objects, Quiet: aws.Bool(true)},
 		}, opts)
 		if err != nil {
 			return fmt.Errorf("could not delete objects under %q: %w", prefix, err)
+		}
+		if len(deleteOutput.Errors) > 0 {
+			return fmt.Errorf("could not delete %q: %s", aws.ToString(deleteOutput.Errors[0].Key), aws.ToString(deleteOutput.Errors[0].Message))
 		}
 		totalDeleted += int64(len(objects))
 		if onProgress != nil {
@@ -471,8 +506,10 @@ func (c *Client) ListContents(ctx context.Context, bucket, prefix, region string
 		}
 
 		// Folders (common prefixes)
+		folderKeys := make(map[string]struct{}, len(output.CommonPrefixes))
 		for _, cp := range output.CommonPrefixes {
 			fullPrefix := aws.ToString(cp.Prefix)
+			folderKeys[fullPrefix] = struct{}{}
 			name := strings.TrimPrefix(fullPrefix, prefix)
 			items = append(items, BrowseItem{
 				Name:     name,
@@ -486,6 +523,11 @@ func (c *Client) ListContents(ctx context.Context, bucket, prefix, region string
 			key := aws.ToString(obj.Key)
 			// Skip the prefix itself if it appears as an object
 			if key == prefix {
+				continue
+			}
+			// Explicit folder-marker objects can also be returned as a common
+			// prefix. Render them once as folders, not again as files.
+			if _, isFolderMarker := folderKeys[key]; isFolderMarker {
 				continue
 			}
 			name := strings.TrimPrefix(key, prefix)
@@ -723,7 +765,15 @@ func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix, region str
 
 // SetPrefixPrivate removes the public access policy statement for a prefix.
 func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix, region string) error {
-	sid := "s3m-public-" + strings.TrimSuffix(prefix, "/")
+	return c.SetPrefixesPrivate(ctx, bucket, []string{prefix}, region)
+}
+
+// SetPrefixesPrivate removes public-access policy statements for prefixes in one policy rewrite.
+func (c *Client) SetPrefixesPrivate(ctx context.Context, bucket string, prefixes []string, region string) error {
+	sids := make(map[string]struct{}, len(prefixes))
+	for _, prefix := range prefixes {
+		sids["s3m-public-"+strings.TrimSuffix(prefix, "/")] = struct{}{}
+	}
 	opts := func(o *s3.Options) {
 		if region != "" {
 			o.Region = region
@@ -734,7 +784,11 @@ func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix, region st
 		Bucket: aws.String(bucket),
 	}, opts)
 	if err != nil {
-		return nil // No policy means already private
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucketPolicy" {
+			return nil
+		}
+		return fmt.Errorf("could not read bucket policy for %q: %w", bucket, err)
 	}
 
 	var doc policyDocument
@@ -744,10 +798,16 @@ func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix, region st
 
 	// Remove the statement for this prefix
 	filtered := make([]policyStatement, 0, len(doc.Statement))
+	removed := false
 	for _, stmt := range doc.Statement {
-		if stmt.Sid != sid {
+		if _, shouldRemove := sids[stmt.Sid]; !shouldRemove {
 			filtered = append(filtered, stmt)
+		} else {
+			removed = true
 		}
+	}
+	if !removed {
+		return nil
 	}
 
 	if len(filtered) == 0 {
@@ -778,7 +838,7 @@ func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix, region st
 		Policy: aws.String(string(policyJSON)),
 	}, opts)
 	if err != nil {
-		return fmt.Errorf("could not remove public access for prefix %q: %w", prefix, err)
+		return fmt.Errorf("could not remove public access for selected prefixes: %w", err)
 	}
 	return nil
 }

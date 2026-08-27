@@ -73,11 +73,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			if a.buckets.urlUpload == nil {
+				if a.buckets.bulkDeleteCancel != nil {
+					a.buckets.bulkDeleteCancel()
+				}
 				return a, tea.Quit
 			}
 		case "q":
 			// Quit from any screen, unless user is typing in a text input
 			if !a.isTextInputActive() {
+				if a.buckets.bulkDeleteCancel != nil {
+					a.buckets.bulkDeleteCancel()
+				}
 				return a, tea.Quit
 			}
 		case "?":
@@ -93,7 +99,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case errMsg:
-		if a.screen != screenBuckets || a.buckets.transferSnap == nil || !errors.Is(msg.err, context.Canceled) {
+		cancelledBackgroundOperation := errors.Is(msg.err, context.Canceled) &&
+			(a.buckets.transferSnap != nil || a.buckets.bulkDeleting)
+		if a.screen != screenBuckets || !cancelledBackgroundOperation {
 			a.err = msg.err
 		}
 		hadErr = true
@@ -140,6 +148,8 @@ func (a App) viewHelp() string {
 	s += "  u       Open users\n"
 	s += "  c       Create new item / copy URL\n"
 	s += "  d       Delete selected item\n"
+	s += "  space   Select / deselect item while browsing\n"
+	s += "  a       Select all / clear selection while browsing\n"
 	s += "  g       Download selected file\n"
 	s += "  p       Upload file to current folder\n"
 	s += "  U       Upload to S3 from a URL or WeTransfer link\n"
@@ -162,6 +172,7 @@ func (a App) isTextInputActive() bool {
 		a.buckets.mode == bucketDetailAddFolder ||
 		a.buckets.mode == bucketDetailConfirm ||
 		a.buckets.mode == bucketDetailDeleteFolder ||
+		a.buckets.mode == bucketDetailDeleteSelection ||
 		a.buckets.mode == bucketDetailPickUser ||
 		a.buckets.mode == bucketDetailPickPerm ||
 		a.buckets.mode == bucketDetailConfirmRemoveUser ||
@@ -269,6 +280,10 @@ type folderCountedMsg struct {
 }
 
 type folderDeleteProgressMsg struct {
+	deleted int64
+}
+
+type selectionDeleteProgressMsg struct {
 	deleted int64
 }
 
