@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1907,7 +1906,11 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				})
 
 				key := prefix + filename
-				if err := m.client.UploadObjectSized(ctx, bucket.name, key, bucket.region, reader, totalSize); err != nil {
+				// Multipart upload: single PutObject caps at 5 GiB, so
+				// stream through the multipart uploader with parts sized
+				// from the file length. The progress reader wraps the
+				// file, so the bar keeps working.
+				if err := m.client.UploadStream(ctx, bucket.name, key, bucket.region, reader, awsClient.AutoPartSize(totalSize), 0); err != nil {
 					return errMsg{err: err}
 				}
 				return uploadDoneMsg{filename: filename}
@@ -2098,18 +2101,14 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				if err != nil {
 					return errMsg{err: fmt.Errorf("could not get working directory: %w", err)}
 				}
-				body, size, err := m.client.DownloadObject(ctx, bucket.name, item.Key, bucket.region)
-				if err != nil {
-					return errMsg{err: fmt.Errorf("could not download %s: %w", item.Name, err)}
+				// Seed the progress total; a lookup failure is non-fatal
+				// (the bar falls back to indeterminate) since the
+				// downloader performs its own size check anyway.
+				size, sizeErr := m.client.GetObjectSize(ctx, bucket.name, item.Key, bucket.region)
+				if sizeErr != nil {
+					size = -1
 				}
-				defer body.Close()
-
-				// Now that we know the size, refresh the snapshot's Total.
 				snap.Store(&progress.Snapshot{Done: 0, Total: size})
-
-				reader := progress.NewReader(body, func(done int64) {
-					snap.Store(&progress.Snapshot{Done: done, Total: size})
-				})
 
 				outPath := filepath.Join(cwd, item.Name)
 				f, err := os.Create(outPath)
@@ -2117,8 +2116,13 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 					return errMsg{err: fmt.Errorf("could not create file %s: %w", outPath, err)}
 				}
 				defer f.Close()
-				if _, err := io.Copy(f, reader); err != nil {
-					return errMsg{err: fmt.Errorf("could not write file %s: %w", outPath, err)}
+				// Concurrent ranged download: parallelizes large files
+				// instead of a single streaming GetObject.
+				writer := progress.NewWriterAt(f, func(done int64) {
+					snap.Store(&progress.Snapshot{Done: done, Total: size})
+				})
+				if _, err := m.client.DownloadFile(ctx, bucket.name, item.Key, bucket.region, writer, 0, 0); err != nil {
+					return errMsg{err: fmt.Errorf("could not download %s: %w", item.Name, err)}
 				}
 				return downloadDoneMsg{filename: item.Name, path: outPath}
 			})

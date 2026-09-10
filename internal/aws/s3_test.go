@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -40,6 +41,10 @@ type mockS3 struct {
 	deleteBucketPolicyErr      error
 	deleteObjectBatches        [][]string
 	deleteObjectsOutput        *s3.DeleteObjectsOutput
+	headObjectOutput           *s3.HeadObjectOutput
+	headObjectErr              error
+	getObjectOutput            *s3.GetObjectOutput
+	getObjectErr               error
 
 	// multipart tracking for TestUploadStream
 	createMultipartCalled   atomic.Int32
@@ -115,7 +120,17 @@ func (m *mockS3) DeleteObjects(_ context.Context, input *s3.DeleteObjectsInput, 
 }
 
 func (m *mockS3) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	if m.getObjectOutput != nil || m.getObjectErr != nil {
+		return m.getObjectOutput, m.getObjectErr
+	}
 	return &s3.GetObjectOutput{}, nil
+}
+
+func (m *mockS3) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	if m.headObjectOutput != nil || m.headObjectErr != nil {
+		return m.headObjectOutput, m.headObjectErr
+	}
+	return &s3.HeadObjectOutput{}, nil
 }
 
 func (m *mockS3) CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
@@ -272,6 +287,93 @@ func TestUploadObjectSizedSetsContentLength(t *testing.T) {
 	}
 	if got := *mock.putObjectContentLength; got != size {
 		t.Fatalf("ContentLength = %d, want %d", got, size)
+	}
+}
+
+func TestAutoPartSize(t *testing.T) {
+	const (
+		mib = 1024 * 1024
+		gib = 1024 * mib
+		tib = 1024 * gib
+	)
+	cases := []struct {
+		name string
+		size int64
+		want int64
+	}{
+		{"unknown zero", 0, 256 * mib},
+		{"unknown negative", -1, 256 * mib},
+		{"small rounds up to minimum", 1 * mib, 64 * mib},
+		{"5.6GB stays at minimum", 6012954214, 64 * mib},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := AutoPartSize(tc.size); got != tc.want {
+				t.Errorf("AutoPartSize(%d) = %d; want %d", tc.size, got, tc.want)
+			}
+		})
+	}
+
+	// 5 TiB must scale up so part count stays under the cap.
+	huge := int64(5) * tib
+	got := AutoPartSize(huge)
+	if parts := huge / got; parts > 9500 {
+		t.Errorf("AutoPartSize(5TiB) = %d gives %d parts; want <= 9500", got, parts)
+	}
+	if got < 64*mib {
+		t.Errorf("AutoPartSize(5TiB) = %d; want >= 64MiB", got)
+	}
+}
+
+type memWriterAt struct {
+	buf []byte
+}
+
+func (m *memWriterAt) WriteAt(p []byte, off int64) (int, error) {
+	copy(m.buf[off:], p)
+	return len(p), nil
+}
+
+func TestDownloadFile(t *testing.T) {
+	payload := []byte("hello s3 multipart download")
+	mock := &mockS3{
+		headObjectOutput: &s3.HeadObjectOutput{
+			ContentLength: aws.Int64(int64(len(payload))),
+		},
+		getObjectOutput: &s3.GetObjectOutput{
+			Body:          io.NopCloser(bytes.NewReader(payload)),
+			ContentLength: aws.Int64(int64(len(payload))),
+		},
+	}
+	client := &Client{S3: mock, Region: "us-east-1"}
+
+	dest := &memWriterAt{buf: make([]byte, len(payload))}
+	n, err := client.DownloadFile(context.Background(), "b", "k", "us-west-2", dest, 5*1024*1024, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != int64(len(payload)) {
+		t.Errorf("DownloadFile wrote %d bytes; want %d", n, len(payload))
+	}
+	if !bytes.Equal(dest.buf, payload) {
+		t.Errorf("DownloadFile content mismatch: got %q want %q", dest.buf, payload)
+	}
+}
+
+func TestGetObjectSize(t *testing.T) {
+	mock := &mockS3{
+		headObjectOutput: &s3.HeadObjectOutput{
+			ContentLength: aws.Int64(6012954214), // 5.6 GiB
+		},
+	}
+	client := &Client{S3: mock, Region: "us-east-1"}
+
+	size, err := client.GetObjectSize(context.Background(), "b", "k", "us-west-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if size != 6012954214 {
+		t.Errorf("GetObjectSize = %d; want 6012954214", size)
 	}
 }
 

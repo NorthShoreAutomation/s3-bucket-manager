@@ -573,7 +573,76 @@ func (c *Client) DownloadObject(ctx context.Context, bucket, key, region string)
 	return output.Body, size, nil
 }
 
+// AutoPartSize returns an appropriate S3 multipart part size for the given
+// content length, keeping the part count comfortably under the 10,000-part
+// S3 cap. Mirrors httpcopy.ComputePartSize so disk uploads and URL uploads
+// size parts identically. Pass 0 or negative for unknown size.
+func AutoPartSize(contentLength int64) int64 {
+	const (
+		minPart      = 64 << 20  // 64 MiB, S3 minimum for non-final parts
+		fallbackPart = 256 << 20 // 256 MiB when size is unknown
+		safetyDiv    = 9500      // stay well under the 10,000-part S3 cap
+	)
+	if contentLength <= 0 {
+		return fallbackPart
+	}
+	computed := (contentLength + safetyDiv - 1) / safetyDiv
+	if computed < minPart {
+		return minPart
+	}
+	return computed
+}
+
+// DownloadFile downloads an S3 object to dest using concurrent ranged GETs
+// via manager.Downloader. partSize and concurrency are optional; pass 0 to
+// use manager defaults. Returns bytes written. Unlike DownloadObject (single
+// GetObject), this parallelizes large downloads and has no 5 GiB ceiling.
+func (c *Client) DownloadFile(ctx context.Context, bucket, key, region string, dest io.WriterAt, partSize int64, concurrency int) (int64, error) {
+	downloader := manager.NewDownloader(c.S3, func(d *manager.Downloader) {
+		if partSize > 0 {
+			d.PartSize = partSize
+		}
+		if concurrency > 0 {
+			d.Concurrency = concurrency
+		}
+	})
+	var downloadOpts []func(*manager.Downloader)
+	if region != "" {
+		downloadOpts = append(downloadOpts, manager.WithDownloaderClientOptions(func(o *s3.Options) {
+			o.Region = region
+		}))
+	}
+	n, err := downloader.Download(ctx, dest, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}, downloadOpts...)
+	if err != nil {
+		return 0, fmt.Errorf("could not download %q: %w", key, err)
+	}
+	return n, nil
+}
+
+// GetObjectSize returns the size of an S3 object in bytes via HeadObject.
+// Callers use it to seed progress-bar totals before a DownloadFile.
+func (c *Client) GetObjectSize(ctx context.Context, bucket, key, region string) (int64, error) {
+	opts := func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	}
+	output, err := c.S3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}, opts)
+	if err != nil {
+		return 0, fmt.Errorf("could not head %q: %w", key, err)
+	}
+	return aws.ToInt64(output.ContentLength), nil
+}
+
 // UploadObject uploads a file to S3 at the given key.
+// Single-PUT only: S3 caps a single PutObject at 5 GiB. Callers uploading
+// user-chosen files must use UploadStream (multipart) instead.
 func (c *Client) UploadObject(ctx context.Context, bucket, key, region string, body io.Reader) error {
 	return c.UploadObjectSized(ctx, bucket, key, region, body, -1)
 }
