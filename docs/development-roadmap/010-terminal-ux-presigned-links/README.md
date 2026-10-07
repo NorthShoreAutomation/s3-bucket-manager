@@ -2,7 +2,8 @@
 
 - Phase: 010
 - Branch: feat/presigned-url
-- Status: PR ready, operator accepted, independent review clean
+- Status: PR open, operator accepted, independent review clean
+- Pull request: [#88](https://github.com/NorthShoreAutomation/s3-bucket-manager/pull/88)
 - Claimed: 2026-10-07
 
 - [Implementation plan](implementation-plan.md)
