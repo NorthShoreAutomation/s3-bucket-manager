@@ -6,7 +6,7 @@ The operator selected all screen improvements from the initial review, then temp
 This plan implements that scope on `feat/presigned-url` under phase `010-terminal-ux-presigned-links`.
 The phase claim is commit `800c0a5`. Application baseline is `bfd15bc`.
 
-Status: implementation and validation complete, ready for operator inspection.
+Status: operator accepted; implementation, validation, and independent review complete; PR ready.
 The operator confirmed `/` to activate live bucket and file filtering before implementation.
 
 Success means an operator can find a file, transfer it safely, manage access deliberately, and copy a temporary download link.
