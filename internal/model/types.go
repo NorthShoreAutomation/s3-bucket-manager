@@ -7,6 +7,7 @@ type Bucket struct {
 	Region       string
 	CreationDate time.Time
 	IsPublic     bool
+	AccessKnown  bool
 	ObjectCount  int64
 }
 
@@ -29,11 +30,12 @@ type UserPermission struct {
 }
 
 type User struct {
-	Name         string
-	ARN          string
-	CreateDate   time.Time
-	BucketAccess []BucketAccess
-	KeyCount     int
+	Name          string
+	ARN           string
+	CreateDate    time.Time
+	BucketAccess  []BucketAccess
+	KeyCount      int
+	KeyCountKnown bool
 }
 
 type AccessKey struct {
@@ -41,6 +43,7 @@ type AccessKey struct {
 	SecretAccessKey string
 	UserName        string
 	CreateDate      time.Time
+	Status          string
 }
 
 type PrefixAccess struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,29 +31,37 @@ var userListCmd = &cobra.Command{
 			return fmt.Errorf("Could not connect to AWS. Check your credentials.\n  Detail: %w", err)
 		}
 
-		users, err := client.ListManagedUsers(ctx)
-		if err != nil {
-			return err
-		}
-
-		if jsonOut {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(users)
-		}
-
-		if len(users) == 0 {
-			fmt.Println("No s3m-managed users found. Create one with: s3m user create <username> --buckets <bucket1,bucket2>")
-			return nil
-		}
-
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "USERNAME\tKEYS\tCREATED")
-		for _, u := range users {
-			fmt.Fprintf(w, "%s\t%d\t%s\n", u.Name, u.KeyCount, u.CreateDate.Format("2006-01-02"))
-		}
-		return w.Flush()
+		users, listErr := client.ListManagedUsers(ctx)
+		return writeUserList(cmd.OutOrStdout(), cmd.ErrOrStderr(), users, listErr, jsonOut)
 	},
+}
+
+func writeUserList(out, warnings io.Writer, users []model.User, listErr error, asJSON bool) error {
+	if listErr != nil && len(users) == 0 {
+		return listErr
+	}
+	if listErr != nil {
+		fmt.Fprintf(warnings, "Warning: user metadata is incomplete: %v\n", listErr)
+	}
+	if asJSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(users)
+	}
+	if len(users) == 0 {
+		_, err := fmt.Fprintln(out, "No s3m-managed users found. Create one with: s3m user create <username> --buckets <bucket1,bucket2>")
+		return err
+	}
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "USERNAME\tKEYS\tCREATED")
+	for _, u := range users {
+		count := "unknown"
+		if u.KeyCountKnown {
+			count = fmt.Sprint(u.KeyCount)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", u.Name, count, u.CreateDate.Format("2006-01-02"))
+	}
+	return w.Flush()
 }
 
 var (

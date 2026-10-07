@@ -6,8 +6,8 @@ The operator selected all screen improvements from the initial review, then temp
 This plan implements that scope on `feat/presigned-url` under phase `010-terminal-ux-presigned-links`.
 The phase claim is commit `800c0a5`. Application baseline is `bfd15bc`.
 
-Status: proposed implementation approach, ready for operator inspection. No application changes have started.
-This turn covers the phase claim and plan only.
+Status: implementation and validation complete, ready for operator inspection.
+The operator confirmed `/` to activate live bucket and file filtering before implementation.
 
 Success means an operator can find a file, transfer it safely, manage access deliberately, and copy a temporary download link.
 The interface must show the correct account, resource, operation state, and expiration limits.
@@ -51,7 +51,7 @@ Use words as well as color for success, warning, error, loading, and cancellatio
 | Left / Escape | Return one level. Escape first closes the active filter or dialog. |
 | Tab | Switch Files, Access, and Details when no form is active; move between fields inside a form. |
 | `r` | Refresh the active list or resource. Never create credentials. |
-| `/` | Filter the current list by name. |
+| `/` | Activate live name filtering. Each character updates results immediately; Enter keeps results, Escape clears the filter. |
 | Space | Toggle the focused file or folder in the selection. |
 | `a` in Files | Select all displayed results, or clear the current selection. |
 | `n` in Files | Create a folder in the displayed destination. |
@@ -80,7 +80,9 @@ Cancellation reports completed work and any cleanup failure. It never implies th
 - Use terminal-column-aware width and truncation. Never cut a UTF-8 byte sequence or an escape sequence.
 - Keep a text focus marker in addition to selection color. Test light and dark terminal backgrounds.
 
-Filtering is case-insensitive name matching over loaded entries.
+Filtering is case-insensitive substring matching over loaded entries.
+It covers bucket names and all file/folder names in the current folder, including entries beyond the first listing page.
+Filtering makes no cloud request per keystroke. Show the query and matching count.
 Changing the filter clears selection and clamps the cursor. Select all refers to the displayed results.
 Refresh preserves the focused object by key and reconciles selections against the refreshed listing.
 Folder navigation clears selection but restores the parent's cursor and scroll position when returning.

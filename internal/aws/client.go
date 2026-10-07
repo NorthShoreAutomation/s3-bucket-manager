@@ -67,13 +67,16 @@ type CloudWatchAPI interface {
 
 // Client wraps AWS service clients.
 type Client struct {
-	S3         S3API
-	IAM        IAMAPI
-	STS        STSAPI
-	CloudWatch CloudWatchAPI
-	Region     string
-	Profile    string
-	Account    string
+	S3                 S3API
+	IAM                IAMAPI
+	STS                STSAPI
+	CloudWatch         CloudWatchAPI
+	Region             string
+	Profile            string
+	Account            string
+	PresignS3          PresignGetObjectAPI
+	Credentials        aws.CredentialsProvider
+	CurrentAccessKeyID string
 }
 
 // NewClient creates an AWS client with the given profile and region.
@@ -102,12 +105,14 @@ func NewClient(ctx context.Context, profile, region string) (*Client, error) {
 	cwClient := cloudwatch.NewFromConfig(cfg)
 
 	c := &Client{
-		S3:         s3Client,
-		IAM:        iamClient,
-		STS:        stsClient,
-		CloudWatch: cwClient,
-		Region:     cfg.Region,
-		Profile:    profile,
+		S3:          s3Client,
+		IAM:         iamClient,
+		STS:         stsClient,
+		CloudWatch:  cwClient,
+		Region:      cfg.Region,
+		Profile:     profile,
+		PresignS3:   s3.NewPresignClient(s3Client),
+		Credentials: cfg.Credentials,
 	}
 
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
@@ -115,6 +120,9 @@ func NewClient(ctx context.Context, profile, region string) (*Client, error) {
 		return nil, fmt.Errorf("unable to get AWS account info: %w", err)
 	}
 	c.Account = aws.ToString(identity.Account)
+	if credentials, retrieveErr := cfg.Credentials.Retrieve(ctx); retrieveErr == nil {
+		c.CurrentAccessKeyID = credentials.AccessKeyID
+	}
 
 	return c, nil
 }

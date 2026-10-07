@@ -3,13 +3,14 @@
 //
 // The public surface is intentionally small: callers construct an Options,
 // provide an Uploader (satisfied by *aws.Client), and call Run.  Progress
-// events are delivered through a nil-safe callback — the caller is responsible
+// events are delivered through a nil-safe callback. The caller is responsible
 // for throttling its UI; httpcopy never spawns background goroutines or
 // time-based timers.
 package httpcopy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -43,6 +44,8 @@ type Options struct {
 	Concurrency int            // 0 => uploader default
 	Progress    func(Progress) // nil-safe; called on state changes and data reads
 	HTTPClient  *http.Client   // nil => internal long-timeout client
+	Conditional bool           // require conditional destination protection
+	Condition   *string        // nil requires absence; otherwise reviewed ETag
 }
 
 // Uploader is the interface satisfied by *aws.Client.  Declaring it here keeps
@@ -52,12 +55,34 @@ type Uploader interface {
 	UploadStream(ctx context.Context, bucket, key, region string, body io.Reader, partSize int64, concurrency int) error
 }
 
+// ConditionalUploader protects the destination against concurrent replacement.
+type ConditionalUploader interface {
+	UploadStreamConditional(context.Context, string, string, string, io.Reader, int64, int, *string) error
+}
+
+// Resolved is safe to display before starting an upload.
+type Resolved struct {
+	URL        string
+	Key        string
+	BytesTotal int64
+}
+
+// Resolve obtains the source filename and size without writing to S3.
+func Resolve(ctx context.Context, opt Options) (Resolved, error) {
+	resp, directURL, key, err := prepare(ctx, opt)
+	if err != nil {
+		return Resolved{}, err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	return Resolved{URL: directURL, Key: key, BytesTotal: resp.ContentLength}, nil
+}
+
 // defaultClient returns an http.Client suited for large file transfers.
 // No global timeout is set because 700 GB can take many hours; the transport
 // sets short per-connection deadlines to detect stalled connections.
 func defaultClient() *http.Client {
 	return &http.Client{
-		Timeout: 0, // no deadline — large files can take hours
+		Timeout: 0, // no deadline - large files can take hours
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: 30 * time.Second,
 			IdleConnTimeout:       90 * time.Second,
@@ -79,63 +104,16 @@ func defaultClient() *http.Client {
 //
 // The resolved key is always sanitized by stripping any leading "/".
 func Run(ctx context.Context, up Uploader, opt Options) (key string, err error) {
-	client := opt.HTTPClient
-	if client == nil {
-		client = defaultClient()
-	}
-
 	emit := func(p Progress) {
 		if opt.Progress != nil {
 			opt.Progress(p)
 		}
 	}
-
-	directURL := opt.URL
-	resolverFilename := ""
-
-	// Detect WeTransfer and resolve to a direct link when applicable.
-	parsed, parseErr := url.Parse(opt.URL)
-	if parseErr != nil {
-		return "", fmt.Errorf("could not parse URL %q: %w", opt.URL, parseErr)
+	resp, _, key, err := prepare(ctx, opt)
+	if err != nil {
+		return "", err
 	}
-
-	if httpresolve.IsWeTransferHost(parsed.Host) {
-		emit(Progress{Phase: "resolving", BytesTotal: -1})
-
-		resolved, fallback, resolveErr := httpresolve.ResolveDirectLink(ctx, client, opt.URL)
-		if resolveErr != nil {
-			return "", fmt.Errorf("could not resolve WeTransfer URL: %w", resolveErr)
-		}
-
-		directURL = resolved
-		resolverFilename = fallback
-		emit(Progress{Phase: "resolving", ResolvedURL: directURL, BytesTotal: -1})
-	}
-
-	// GET the direct download URL.
-	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, directURL, nil)
-	if reqErr != nil {
-		return "", fmt.Errorf("could not build download request for %q: %w", directURL, reqErr)
-	}
-
-	resp, doErr := client.Do(req)
-	if doErr != nil {
-		return "", fmt.Errorf("could not fetch %q: %w", directURL, doErr)
-	}
-	// resp.Body is closed after upload finishes — see deferred close below.
-
-	// Reject non-2xx responses before touching the body pipeline.
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		preview := make([]byte, 512)
-		n, _ := io.ReadFull(resp.Body, preview)
-		resp.Body.Close() //nolint:errcheck
-		return "", fmt.Errorf("download request returned status %d: %s", resp.StatusCode, preview[:n])
-	}
-
 	defer resp.Body.Close() //nolint:errcheck
-
-	// Derive the final S3 key.
-	key = deriveKey(opt.Key, resp.Header.Get("Content-Disposition"), resolverFilename, directURL)
 
 	// Compute part size.
 	partSize := opt.PartSize
@@ -163,7 +141,17 @@ func Run(ctx context.Context, up Uploader, opt Options) (key string, err error) 
 	}
 	cr := progress.NewReader(resp.Body, onRead)
 
-	if uploadErr := up.UploadStream(ctx, opt.Bucket, key, opt.Region, cr, partSize, opt.Concurrency); uploadErr != nil {
+	var uploadErr error
+	if opt.Conditional {
+		safe, ok := up.(ConditionalUploader)
+		if !ok {
+			return "", fmt.Errorf("uploader cannot protect the reviewed destination")
+		}
+		uploadErr = safe.UploadStreamConditional(ctx, opt.Bucket, key, opt.Region, cr, partSize, opt.Concurrency, opt.Condition)
+	} else {
+		uploadErr = up.UploadStream(ctx, opt.Bucket, key, opt.Region, cr, partSize, opt.Concurrency)
+	}
+	if uploadErr != nil {
 		return "", fmt.Errorf("could not upload to s3://%s/%s: %w", opt.Bucket, key, uploadErr)
 	}
 
@@ -176,6 +164,62 @@ func Run(ctx context.Context, up Uploader, opt Options) (key string, err error) 
 	})
 
 	return key, nil
+}
+
+// prepare opens the source only long enough to obtain its authoritative name.
+func prepare(ctx context.Context, opt Options) (*http.Response, string, string, error) {
+	client := opt.HTTPClient
+	if client == nil {
+		client = defaultClient()
+	}
+	directURL := opt.URL
+	fallback := ""
+	parsed, err := url.Parse(opt.URL)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("could not parse source URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, "", "", fmt.Errorf("source URL must use HTTP or HTTPS")
+	}
+	if parsed.Host == "" {
+		return nil, "", "", fmt.Errorf("source URL requires a host")
+	}
+	if httpresolve.IsWeTransferHost(parsed.Host) {
+		if opt.Progress != nil {
+			opt.Progress(Progress{Phase: "resolving", BytesTotal: -1})
+		}
+		directURL, fallback, err = httpresolve.ResolveDirectLink(ctx, client, opt.URL)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("could not resolve WeTransfer URL: %w", err)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, directURL, nil)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("could not build source request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		var requestErr *url.Error
+		if errors.As(err, &requestErr) {
+			err = requestErr.Err
+		}
+		return nil, "", "", fmt.Errorf("could not fetch source: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		preview := make([]byte, 512)
+		n, _ := io.ReadFull(resp.Body, preview)
+		resp.Body.Close()
+		return nil, "", "", fmt.Errorf("download request returned status %d: %s", resp.StatusCode, preview[:n])
+	}
+	key := deriveKey(opt.Key, resp.Header.Get("Content-Disposition"), fallback, directURL)
+	if key == "" || strings.HasSuffix(key, "/") {
+		resp.Body.Close()
+		return nil, "", "", fmt.Errorf("source has no filename; enter a destination filename")
+	}
+	if opt.Progress != nil {
+		opt.Progress(Progress{Phase: "resolving", ResolvedURL: directURL, Filename: key, BytesTotal: resp.ContentLength})
+	}
+	return resp, directURL, key, nil
 }
 
 // deriveKey computes the final S3 key from the caller's opt.Key, the
@@ -208,7 +252,7 @@ func deriveKey(optKey, contentDisposition, resolverFilename, directURL string) s
 }
 
 // filenameFromContentDisposition parses a Content-Disposition header value and
-// returns the filename parameter, sanitized to just the basename — any
+// returns the filename parameter, sanitized to just the basename - any
 // directory components are stripped to prevent a hostile server from steering
 // the S3 key outside the caller's intended prefix (e.g., filename="../../foo").
 // Returns an empty string when absent, malformed, or when the sanitized result
@@ -256,7 +300,7 @@ func lastPathSegment(rawURL string) string {
 //   - Otherwise: max(64 MiB, ceil(contentLength / 9500)).
 func ComputePartSize(contentLength int64) int64 {
 	const (
-		minPart      = 64 << 20  // 64 MiB — S3 minimum for non-final parts
+		minPart      = 64 << 20  // 64 MiB - S3 minimum for non-final parts
 		fallbackPart = 256 << 20 // 256 MiB when Content-Length is unknown
 		safetyDiv    = 9500      // stay well under the 10,000-part S3 cap
 	)

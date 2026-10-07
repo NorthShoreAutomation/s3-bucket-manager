@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/atotto/clipboard"
 	bubprogress "github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -23,12 +20,17 @@ import (
 )
 
 type bucketItem struct {
-	name      string
-	region    string
-	isPublic  bool
-	objects   int64
-	sizeBytes int64
-	created   string
+	name          string
+	region        string
+	isPublic      bool
+	objects       int64
+	sizeBytes     int64
+	created       string
+	statsKnown    bool
+	accessKnown   bool
+	statsUpdated  time.Time
+	managedPublic bool
+	policyKnown   bool
 }
 
 type prefixItem struct {
@@ -61,20 +63,51 @@ type bucketUserItem struct {
 }
 
 type bucketsModel struct {
-	client         *awsClient.Client
-	items          []bucketItem
-	cursor         int
-	offset         int // first visible row for scrolling
-	loading        bool
-	width          int
-	height         int
-	mode           bucketsMode
-	nameInput      textinput.Model
-	deleteInput    textinput.Model // type 'delete' to start deletion
-	confirmInput   textinput.Model // type bucket name to confirm destructive delete
-	message        string
-	spinner        spinner.Model
-	deleteProgress string // shown during bucket emptying
+	fullBuckets          []bucketItem
+	fullBrowse           []awsClient.BrowseItem
+	filterInput          textinput.Model
+	filterActive         bool
+	filterScope          string
+	detailTab            int // Files, Access, Details
+	err                  error
+	errKind              string
+	failedTransferReview *transferReview
+	partialBucketCreated bool
+	mutationCancel       context.CancelFunc
+	inspectText          string
+	browseRequests       *atomic.Uint64
+	prefixRequests       *atomic.Uint64
+	listRequests         *atomic.Uint64
+	userRequests         *atomic.Uint64
+	metadataRequests     *atomic.Uint64
+	parentPositions      map[string]browsePosition
+	pendingBrowseKey     string
+	pendingDelete        []awsClient.BrowseItem
+	mutationPending      bool
+	cancelling           bool
+	quitAfterCancel      bool
+	accessOffset         int
+	share                *shareModel
+	transferReview       *transferReview
+	deleteBucket         bucketItem
+	userPickerSource     []userItem
+	userPickerFilter     userFilter
+	userPickerOffset     int
+	dialogOffset         int
+	client               *awsClient.Client
+	items                []bucketItem
+	cursor               int
+	offset               int // first visible row for scrolling
+	loading              bool
+	width                int
+	height               int
+	mode                 bucketsMode
+	nameInput            textinput.Model
+	deleteInput          textinput.Model // type 'delete' to start deletion
+	confirmInput         textinput.Model // type bucket name to confirm destructive delete
+	message              string
+	spinner              spinner.Model
+	deleteProgress       string // shown during bucket emptying
 
 	// Detail view fields
 	detailCursor  int             // cursor position in detail view (0 = bucket row, 1+ = users, then prefixes)
@@ -82,8 +115,8 @@ type bucketsModel struct {
 	prefixInput   textinput.Model // for adding new prefixes
 	confirmInput2 textinput.Model // for typing 'yes' to confirm access change
 	confirmAction string          // description of what will happen
-	confirmFunc   func() tea.Msg  // the action to execute on confirmation
-	detailMessage string          // status message in detail view
+	confirmFunc   func(context.Context) tea.Msg
+	detailMessage string // status message in detail view
 
 	// Bucket user access
 	bucketUsers        []bucketUserItem // users with access to current bucket
@@ -119,7 +152,6 @@ type bucketsModel struct {
 	transferSnap     *atomic.Pointer[progress.Snapshot]
 	transferBar      bubprogress.Model // bubbles progress bar
 	transferLabel    string            // e.g. "Uploading photo.jpg"
-	transferTotal    int64             // bytes; -1 when unknown
 	transferLastDone int64
 	transferLastTime time.Time
 	transferRate     float64
@@ -152,36 +184,44 @@ func newBucketsModel(client *awsClient.Client) bucketsModel {
 		bubprogress.WithoutPercentage(),
 	)
 	return bucketsModel{
-		client:        client,
-		nameInput:     ti,
-		deleteInput:   di,
-		confirmInput:  ci,
-		prefixInput:   pi,
-		confirmInput2: ci2,
-		loading:       true,
-		spinner:       sp,
-		transferBar:   transferBar,
+		client:           client,
+		nameInput:        ti,
+		deleteInput:      di,
+		confirmInput:     ci,
+		prefixInput:      pi,
+		confirmInput2:    ci2,
+		loading:          true,
+		spinner:          sp,
+		transferBar:      transferBar,
+		filterInput:      textinput.New(),
+		browseRequests:   &atomic.Uint64{},
+		prefixRequests:   &atomic.Uint64{},
+		listRequests:     &atomic.Uint64{},
+		userRequests:     &atomic.Uint64{},
+		metadataRequests: &atomic.Uint64{},
 	}
 }
 
 func (m bucketsModel) init() tea.Cmd {
 	m.loading = true
+	request := nextRequest(m.listRequests)
 	return tea.Batch(m.spinner.Tick, func() tea.Msg {
 		ctx := context.Background()
 		buckets, err := m.client.ListBuckets(ctx)
 		if err != nil {
-			return errMsg{err: err}
+			return bucketErrorMsg{err: err, kind: "buckets", request: request}
 		}
 		items := make([]bucketItem, len(buckets))
 		for i, b := range buckets {
 			items[i] = bucketItem{
-				name:     b.Name,
-				region:   b.Region,
-				isPublic: b.IsPublic,
-				created:  b.CreationDate.Format("2006-01-02"),
+				name:        b.Name,
+				region:      b.Region,
+				isPublic:    b.IsPublic,
+				accessKnown: b.AccessKnown,
+				created:     b.CreationDate.Format("2006-01-02"),
 			}
 		}
-		return bucketsLoadedMsg{buckets: items}
+		return bucketsLoadedMsg{buckets: items, request: request}
 	})
 }
 
@@ -194,11 +234,13 @@ func (m bucketsModel) loadBucketStatsCmd() tea.Cmd {
 		name, region := b.name, b.region
 		cmds = append(cmds, func() tea.Msg {
 			ctx := context.Background()
-			stats, _ := m.client.GetBucketStats(ctx, name, region)
+			stats, err := m.client.GetBucketStats(ctx, name, region)
 			return bucketStatsMsg{
 				name:      name,
 				objects:   stats.ObjectCount,
 				sizeBytes: stats.SizeBytes,
+				known:     err == nil && stats.Known,
+				updated:   stats.UpdatedAt,
 			}
 		})
 	}
@@ -221,14 +263,84 @@ func userPermsToItems(users []model.UserPermission) []bucketUserItem {
 }
 
 func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
+	previousMode := m.mode
+	updated, cmd := m.updateContent(msg)
+	if updated.mode != previousMode {
+		updated.dialogOffset = 0
+	}
+	return updated, cmd
+}
+
+func (m bucketsModel) updateContent(msg tea.Msg) (bucketsModel, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok && m.inspectText != "" {
+		switch key.String() {
+		case "esc":
+			m.inspectText = ""
+			m.dialogOffset = 0
+		case "up", "pgup":
+			m.dialogOffset = max(0, m.dialogOffset-1)
+		case "down", "pgdown":
+			m.dialogOffset++
+		}
+		return m, nil
+	}
+	if key, ok := msg.(tea.KeyMsg); ok && (m.mode != bucketsList && m.mode != bucketDetail && m.mode != bucketDetailPickUser || m.mode == bucketDetail && m.detailTab == 2) {
+		if key.String() == "pgdown" {
+			m.dialogOffset += max(1, m.height-6)
+			return m, nil
+		}
+		if key.String() == "pgup" {
+			m.dialogOffset = max(0, m.dialogOffset-max(1, m.height-6))
+			return m, nil
+		}
+	}
+	if result, ok := msg.(transferCheckedMsg); ok {
+		return m.updateTransferChecked(result)
+	}
+	if key, ok := msg.(tea.KeyMsg); ok && m.transferReview != nil {
+		return m.updateTransferReview(key)
+	}
+	if m.share != nil {
+		switch msg.(type) {
+		case tea.KeyMsg, sharePreparedMsg, shareGeneratedMsg:
+			updated, cmd := m.share.Update(msg)
+			m.share = &updated
+			return m, cmd
+		case shareClosedMsg:
+			m.share = nil
+			return m, nil
+		}
+	}
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		if m.filterActive {
+			return m.updateFilter(msg)
+		}
+		if msg.String() == "esc" && m.filterScope != "" && !m.ownsInput() {
+			m.clearFilter()
+			return m, nil
+		}
+		if msg.String() == "/" && (m.mode == bucketsList || m.mode == bucketDetail && m.detailTab == 0) && !m.ownsInput() {
+			cmd := m.beginFilter()
+			return m, cmd
+		}
+		if m.mutationPending {
+			if msg.String() == "esc" || msg.String() == "ctrl+c" {
+				if m.mutationCancel != nil {
+					m.mutationCancel()
+				}
+				m.cancelling = true
+			}
+			return m, nil
+		}
+	}
 	// Delegate all messages to the URL upload sub-model while it is active.
 	// urlUploadDoneMsg / urlUploadErrMsg fall through so the cases below can
 	// clean up m.urlUpload and refresh the browse listing.
 	if m.urlUpload != nil {
 		switch msg.(type) {
 		case urlUploadDoneMsg, urlUploadErrMsg:
-			// handled below — fall through
-		default:
+			// handled below - fall through
+		case tea.KeyMsg, urlUploadResolvedMsg, urlUploadResolveFailedMsg, urlUploadProgressTickMsg, spinner.TickMsg, bubprogress.FrameMsg:
 			updated, cmd := m.urlUpload.Update(msg)
 			m.urlUpload = &updated
 			return m, cmd
@@ -236,11 +348,48 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case bucketErrorMsg:
+		if !m.matchesError(msg) {
+			return m, nil
+		}
+		m.err = msg.err
+		m.errKind = msg.kind
+		if msg.kind == "prefixes" && m.cursor >= 0 && m.cursor < len(m.items) {
+			m.items[m.cursor].policyKnown = false
+		}
+		if msg.kind == "folder" {
+			m.mode = bucketDetailAddFolder
+		}
+		if msg.kind == "create" {
+			var partial *awsClient.PartialBucketCreationError
+			m.partialBucketCreated = errors.As(msg.err, &partial)
+		}
+		if msg.kind == "delete-bucket" {
+			m.loading = false
+			m.bulkDeleting = false
+			m.bulkDeleteCancel = nil
+			m.cancelling = false
+			m.message = "Bucket deletion stopped. Completed deletions remain. " + m.deleteProgress
+			return m, nil
+		}
+		if msg.kind == "create" {
+			m.mode = bucketsCreate
+		}
+		m.mutationPending = false
+		updated, cmd := m.update(errMsg{err: msg.err})
+		return updated, cmd
 	case errMsg:
+		m.mutationCancel = nil
 		m.loading = false
+		m.mutationPending = false
+		m.cancelling = false
 		m.bucketUsersLoading = false
 		wasTransfer := m.transferSnap != nil
 		if wasTransfer {
+			if !errors.Is(msg.err, context.Canceled) && m.failedTransferReview != nil {
+				m.transferReview = m.failedTransferReview
+				m.transferReview.err = msg.err
+			}
 			m.transferSnap = nil
 			m.transferCancel = nil
 			m.transferLabel = ""
@@ -263,36 +412,77 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case bucketsLoadedMsg:
+		if !currentRequest(m.listRequests, msg.request) {
+			return m, nil
+		}
+		focused := m.currentBucketName()
+		m.fullBuckets = append([]bucketItem{}, msg.buckets...)
 		m.items = msg.buckets
+		if m.filterScope == "buckets" {
+			m.applyFilter()
+		}
+		for i, item := range m.items {
+			if item.name == focused {
+				m.cursor = i
+				break
+			}
+		}
+		m.clearError("buckets")
 		m.loading = false
 		m.message = ""
 		m.deleteProgress = ""
 		if m.cursor >= len(m.items) {
 			m.cursor = max(0, len(m.items)-1)
 		}
-		// Kick off background stats fetch (CloudWatch) — list renders immediately
+		// Kick off background stats fetch (CloudWatch) - list renders immediately
 		return m, m.loadBucketStatsCmd()
 
+	case bucketDeleteCompleteMsg:
+		m.loading = true
+		m.bulkDeleting = false
+		m.bulkDeleteCancel = nil
+		m.cancelling = false
+		m.clearError("delete-bucket")
+		m.message = msg.message
+		m.deleteProgress = ""
+		return m, m.init()
 	case bucketStatsMsg:
+		for i := range m.fullBuckets {
+			if m.fullBuckets[i].name == msg.name {
+				m.fullBuckets[i].objects = msg.objects
+				m.fullBuckets[i].sizeBytes = msg.sizeBytes
+				m.fullBuckets[i].statsKnown = msg.known
+				m.fullBuckets[i].statsUpdated = msg.updated
+			}
+		}
 		for i := range m.items {
 			if m.items[i].name == msg.name {
 				m.items[i].objects = msg.objects
 				m.items[i].sizeBytes = msg.sizeBytes
+				m.items[i].statsKnown = msg.known
+				m.items[i].statsUpdated = msg.updated
 				break
 			}
 		}
 		return m, nil
 
 	case operationDoneMsg:
+		m.mutationCancel = nil
+		m.err = nil
+		m.mutationPending = false
+		m.cancelling = false
 		m.message = msg.message
 		m.detailMessage = msg.message
 		m.deleteProgress = ""
 		m.bulkDeleting = false
 		m.bulkDeleteCancel = nil
 		// If we were browsing files, reload the current directory
-		if m.browsePrefix != "" || len(m.browseItems) > 0 {
+		if m.mode == bucketDetail || m.mode == bucketDetailConfirm || m.browsePrefix != "" || len(m.browseItems) > 0 {
 			m.mode = bucketDetail
 			m.loading = true
+			if m.detailTab == 1 {
+				return m, tea.Batch(m.spinner.Tick, m.loadBrowse(), m.loadPrefixes(), m.loadBucketUsers(), m.loadDirectBucketMetadata())
+			}
 			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 		}
 		// If we're in detail view, reload prefixes and bucket users
@@ -317,26 +507,50 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case prefixesLoadedMsg:
-		m.prefixes = msg.prefixes
-		m.mode = bucketDetail
-		m.detailCursor = 0
-		// If no prefixes, auto-load root contents to show files
-		if len(m.prefixes) == 0 {
-			m.browsePrefix = ""
-			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
+		if msg.bucket != m.currentBucketName() || !currentRequest(m.prefixRequests, msg.request) {
+			return m, nil
 		}
-		m.loading = false
+		m.prefixes = msg.prefixes
+		m.items[m.cursor].managedPublic = msg.rootPublic
+		m.items[m.cursor].policyKnown = msg.known
+		m.clearError("prefixes")
 		return m, nil
 
 	case browseLoadedMsg:
+		if msg.bucket != "" && (msg.bucket != m.currentBucketName() || msg.prefix != m.browsePrefix) || !currentRequest(m.browseRequests, msg.request) {
+			return m, nil
+		}
+		focus := m.pendingBrowseKey
+		if focus == "" && m.browseCursor >= 0 && m.browseCursor < len(m.browseItems) {
+			focus = m.browseItems[m.browseCursor].Key
+		}
+		selection := m.browseSelected
+		m.fullBrowse = append([]awsClient.BrowseItem{}, msg.items...)
 		m.browseItems = msg.items
-		m.browseSelected = nil
+		if m.filterScope == "files" {
+			m.applyFilter()
+		}
+		m.browseSelected = make(map[string]bool)
+		for i, item := range m.browseItems {
+			if item.Key == focus {
+				m.browseCursor = i
+			}
+			if selection[item.Key] {
+				m.browseSelected[item.Key] = true
+			}
+		}
 		m.loading = false
-		m.browseCursor = 0
-		m.browseOffset = 0
+		m.clearError("browse")
+		m.pendingBrowseKey = ""
+		m.browseCursor, m.browseOffset = viewportBounds(m.browseCursor, m.browseOffset, len(m.browseItems), m.browseVisibleRows())
 		return m, nil
 
 	case browseFolderCreatedMsg:
+		m.mutationPending = false
+		m.mutationCancel = nil
+		m.clearError("folder")
+		m.clearFilter()
+		m.fullBrowse = nil
 		m.message = msg.message
 		m.detailMessage = msg.message
 		m.browsePrefix = msg.prefix
@@ -358,17 +572,17 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, textinput.Blink
 
 	case bucketUsersLoadedMsg:
-		if msg.bucket != m.currentBucketName() {
+		if msg.bucket != m.currentBucketName() || !currentRequest(m.userRequests, msg.request) {
 			return m, nil
 		}
 		m.bucketUsersError = ""
 		if msg.err != nil {
 			if errors.Is(msg.err, awsClient.ErrIAMAccessDenied) {
-				m.bucketUsersError = "IAM access denied — cannot list managed users with these credentials"
+				m.bucketUsersError = "IAM access denied - cannot list managed users with these credentials"
 			} else {
 				m.bucketUsersError = msg.err.Error()
 			}
-			m.bucketUsers = nil
+			m.bucketUsers = userPermsToItems(msg.users)
 			m.bucketUsersLoading = false
 			return m, nil
 		}
@@ -377,9 +591,11 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case directBucketMetadataLoadedMsg:
-		if m.currentBucketName() != msg.bucket.name {
+		if m.currentBucketName() != msg.bucket.name || !currentRequest(m.metadataRequests, msg.request) {
 			return m, nil
 		}
+		msg.bucket.policyKnown = m.items[m.cursor].policyKnown
+		msg.bucket.managedPublic = m.items[m.cursor].managedPublic
 		m.items[m.cursor] = msg.bucket
 		return m, nil
 
@@ -400,9 +616,13 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		}
 		m.loading = false
 		m.userPickerCursor = 0
+		m.userPickerSource = append([]userItem{}, m.availableUsers...)
+		m.userPickerFilter = userFilter{}
+		m.userPickerOffset = 0
 		return m, nil
 
 	case bucketAccessUpdatedMsg:
+		m.mutationCancel = nil
 		if msg.bucket != m.currentBucketName() {
 			return m, nil
 		}
@@ -410,6 +630,8 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		m.bucketUsersError = ""
 		m.detailMessage = msg.message
 		m.loading = false
+		m.err = nil
+		m.mutationPending = false
 		if m.detailCursor > len(m.bucketUsers) {
 			m.detailCursor = max(0, len(m.bucketUsers))
 		}
@@ -424,6 +646,9 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case downloadDoneMsg:
+		m.failedTransferReview = nil
+		m.err = nil
+		m.cancelling = false
 		m.transferSnap = nil
 		m.transferCancel = nil
 		m.transferLabel = ""
@@ -433,6 +658,9 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, nil
 
 	case uploadDoneMsg:
+		m.failedTransferReview = nil
+		m.err = nil
+		m.cancelling = false
 		m.transferSnap = nil
 		m.transferCancel = nil
 		m.transferLabel = ""
@@ -443,12 +671,23 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 
 	case urlUploadDoneMsg:
+		if m.urlUpload == nil || msg.ID != 0 && msg.ID != m.urlUpload.id {
+			return m, nil
+		}
 		m.urlUpload = nil
 		m.detailMessage = fmt.Sprintf("Uploaded %s (%s)", msg.Key, formatSize(msg.Bytes))
 		// Reload the browse view to show the new file
 		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 
 	case urlUploadErrMsg:
+		if m.urlUpload == nil || msg.ID != 0 && msg.ID != m.urlUpload.id {
+			return m, nil
+		}
+		if msg.Err.Error() != "cancelled" {
+			updated := m.urlUpload.failed(msg.Err)
+			m.urlUpload = &updated
+			return m, nil
+		}
 		m.urlUpload = nil
 		if strings.Contains(msg.Err.Error(), "cancelled") {
 			m.detailMessage = "URL upload cancelled"
@@ -533,15 +772,18 @@ func (m bucketsModel) update(msg tea.Msg) (bucketsModel, tea.Cmd) {
 // visibleRows returns how many bucket rows fit on screen.
 // Accounts for breadcrumb, title, header, help line, and padding.
 func (m bucketsModel) visibleRows() int {
-	overhead := 6 // breadcrumb + title + message + header + blank + help
+	overhead := 8
 	avail := m.height - overhead
-	if avail < 3 {
-		avail = 3
+	if avail < 1 {
+		avail = 1
 	}
 	return avail
 }
 
 func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	if m.loading && msg.String() != "r" {
+		return m, nil
+	}
 	switch msg.String() {
 	case "up", "k":
 		if m.cursor > 0 {
@@ -571,7 +813,7 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		visible := m.visibleRows()
 		m.cursor += visible
 		if m.cursor >= len(m.items) {
-			m.cursor = len(m.items) - 1
+			m.cursor = max(0, len(m.items)-1)
 		}
 		if m.cursor >= m.offset+visible {
 			m.offset = m.cursor - visible + 1
@@ -583,9 +825,10 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		return m, textinput.Blink
 	case "d":
 		if len(m.items) > 0 {
-			m.mode = bucketsTypeDelete
-			m.deleteInput.SetValue("")
-			m.deleteInput.Focus()
+			m.mode = bucketsConfirmDeleteNonEmpty
+			m.confirmInput.SetValue("")
+			m.confirmInput.Focus()
+			m.deleteBucket = m.items[m.cursor]
 			return m, textinput.Blink
 		}
 	case "r":
@@ -593,14 +836,28 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		return m, m.init()
 	case "enter", "right", "l":
 		if len(m.items) > 0 {
+			selectedName := m.items[m.cursor].name
+			m.clearFilter()
+			for i, item := range m.items {
+				if item.name == selectedName {
+					m.cursor = i
+					break
+				}
+			}
 			m.mode = bucketDetail
+			m.detailTab = 0
+			m.browsePrefix = ""
+			m.browseItems = nil
+			m.fullBrowse = nil
+			m.browseCursor = 0
+			m.browseOffset = 0
 			m.detailCursor = 0
 			m.detailMessage = ""
 			m.loading = true
 			m.bucketUsers = nil
 			m.bucketUsersLoading = true
 			m.bucketUsersError = ""
-			return m, tea.Batch(m.spinner.Tick, m.loadPrefixes(), m.loadBucketUsers())
+			return m, tea.Batch(m.spinner.Tick, m.loadBrowse(), m.loadPrefixes(), m.loadBucketUsers(), m.loadDirectBucketMetadata())
 		}
 	}
 	return m, nil
@@ -609,22 +866,37 @@ func (m bucketsModel) updateList(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 func (m bucketsModel) updateCreate(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
+		if m.partialBucketCreated {
+			return m, nil
+		}
 		name := strings.TrimSpace(m.nameInput.Value())
 		if name == "" {
 			return m, nil
 		}
 		m.loading = true
-		m.mode = bucketsList
+		if err := validateBucketName(name); err != nil {
+			m.loading = false
+			m.err = err
+			return m, nil
+		}
+		m.mutationPending = true
+		ctx, cancel := context.WithCancel(context.Background())
+		m.mutationCancel = cancel
 		return m, func() tea.Msg {
-			ctx := context.Background()
+			defer cancel()
 			err := m.client.CreateBucket(ctx, name, m.client.Region)
 			if err != nil {
-				return errMsg{err: err}
+				return bucketErrorMsg{err: err, kind: "create"}
 			}
 			return operationDoneMsg{message: fmt.Sprintf("Created bucket %q", name)}
 		}
 	case "esc":
 		m.mode = bucketsList
+		if m.partialBucketCreated {
+			m.partialBucketCreated = false
+			m.loading = true
+			return m, m.init()
+		}
 		return m, nil
 	default:
 		var cmd tea.Cmd
@@ -664,14 +936,14 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 			ctx := context.Background()
 			empty, err := m.client.IsBucketEmpty(ctx, bucket.name, bucket.region)
 			if err != nil {
-				return errMsg{err: err}
+				return bucketErrorMsg{err: err}
 			}
 			if !empty {
 				return bucketNotEmptyMsg{name: bucket.name, region: bucket.region}
 			}
 			err = m.client.DeleteBucket(ctx, bucket.name, bucket.region)
 			if err != nil {
-				return errMsg{err: err}
+				return bucketErrorMsg{err: err}
 			}
 			return operationDoneMsg{message: fmt.Sprintf("Deleted bucket %q", bucket.name)}
 		}
@@ -684,31 +956,34 @@ func (m bucketsModel) updateConfirmDelete(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 func (m bucketsModel) updateConfirmDeleteNonEmpty(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		typed := strings.TrimSpace(m.confirmInput.Value())
-		bucket := m.items[m.cursor]
-		if typed != bucket.name {
-			m.message = "Name doesn't match. Delete cancelled."
-			m.mode = bucketsList
+		bucket := m.deleteBucket
+		if bucket.name == "" {
+			bucket = m.items[m.cursor]
+		}
+		if strings.TrimSpace(m.confirmInput.Value()) != bucket.name {
+			m.err = fmt.Errorf("type the exact bucket name to confirm")
 			return m, nil
 		}
+		ctx, cancel := context.WithCancel(context.Background())
 		m.loading = true
-		m.deleteProgress = "Emptying bucket... 0 objects removed"
+		m.bulkDeleting = true
+		m.bulkDeleteCancel = cancel
 		m.mode = bucketsList
+		m.deleteProgress = "Deleting bucket contents... 0 objects removed"
 		return m, func() tea.Msg {
-			ctx := context.Background()
+			defer cancel()
 			err := m.client.EmptyBucket(ctx, bucket.name, bucket.region, func(deleted int64) {
 				if prog != nil {
 					prog.Send(deleteProgressMsg{deleted: deleted})
 				}
 			})
 			if err != nil {
-				return errMsg{err: err}
+				return bucketErrorMsg{err: err, kind: "delete-bucket"}
 			}
-			err = m.client.DeleteBucket(ctx, bucket.name, bucket.region)
-			if err != nil {
-				return errMsg{err: err}
+			if err := m.client.DeleteBucket(ctx, bucket.name, bucket.region); err != nil {
+				return bucketErrorMsg{err: err, kind: "delete-bucket"}
 			}
-			return operationDoneMsg{message: fmt.Sprintf("Deleted bucket %q and all its objects", bucket.name)}
+			return bucketDeleteCompleteMsg{message: fmt.Sprintf("Deleted bucket %s and its contents", bucket.name)}
 		}
 	case "esc":
 		m.mode = bucketsList
@@ -744,199 +1019,114 @@ func (m bucketsModel) prefixIndex() int {
 }
 
 func (m bucketsModel) updateDetail(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
-	// When browsing, picking a local file, or showing transfer progress,
-	// delegate to the browse handler. Root-level uploads have no browse prefix
-	// or items, but they still need the picker and cancel keys handled there.
-	if m.showFilePicker || m.transferSnap != nil || m.browsePrefix != "" || len(m.browseItems) > 0 {
+	if m.showFilePicker || m.transferSnap != nil || m.bulkDeleting {
 		return m.updateBrowse(msg)
 	}
-
-	maxRow := len(m.bucketUsers) + len(m.prefixes) // row 0 = bucket toggle
+	if msg.String() == "tab" {
+		m.detailTab = (m.detailTab + 1) % 3
+		return m, nil
+	}
+	if msg.String() == "shift+tab" {
+		m.detailTab = (m.detailTab + 2) % 3
+		return m, nil
+	}
+	if m.detailTab == 0 {
+		return m.updateBrowse(msg)
+	}
+	if msg.String() == "esc" || msg.String() == "left" {
+		return m.leaveBucket()
+	}
+	if msg.String() == "r" {
+		m.bucketUsersLoading = true
+		return m, tea.Batch(m.loadPrefixes(), m.loadBucketUsers(), m.loadDirectBucketMetadata())
+	}
+	if m.detailTab == 2 {
+		return m, nil
+	}
+	maxRow := len(m.bucketUsers) + len(m.prefixes)
 	switch msg.String() {
 	case "up", "k":
-		if m.detailCursor > 0 {
-			m.detailCursor--
-		}
+		m.detailCursor = max(0, m.detailCursor-1)
 	case "down", "j":
-		if m.detailCursor < maxRow {
-			m.detailCursor++
-		}
-	case "right", "l":
-		// Drill into selected prefix (only for prefix rows)
-		section := m.cursorSection()
-		if section == "prefixes" {
-			idx := m.prefixIndex()
-			if idx >= 0 && idx < len(m.prefixes) {
-				m.browsePrefix = m.prefixes[idx].prefix
-				m.browseCursor = 0
-				m.browseOffset = 0
-				m.loading = true
-				return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
-			}
-		}
-	case "enter":
-		section := m.cursorSection()
-		switch section {
-		case "bucket":
-			return m.toggleSelected()
-		case "users":
-			// Cycle permission for the selected user
+		m.detailCursor = min(maxRow, m.detailCursor+1)
+	case "pgup":
+		m.detailCursor = max(0, m.detailCursor-m.browseVisibleRows())
+	case "pgdown":
+		m.detailCursor = min(maxRow, m.detailCursor+m.browseVisibleRows())
+	case "e", "enter":
+		if m.cursorSection() == "users" {
 			idx := m.userIndex()
 			if idx >= 0 && idx < len(m.bucketUsers) {
-				u := m.bucketUsers[idx]
-				newPerm := nextPermission(u.permission)
-				m.loading = true
-				m.detailMessage = ""
-				bucket := m.items[m.cursor]
-				username := u.username
-				updatedUsers := make([]model.UserPermission, 0, len(m.bucketUsers))
-				for i, item := range m.bucketUsers {
-					perm := item.permission
-					if i == idx {
-						perm = newPerm
-					}
-					updatedUsers = append(updatedUsers, model.UserPermission{
-						Username:   item.username,
-						Permission: perm,
-					})
-				}
-				return m, func() tea.Msg {
-					ctx := context.Background()
-					// Get user's full access, update this bucket's permission
-					access, err := m.client.GetUserBucketAccess(ctx, username)
-					if err != nil {
-						return errMsg{err: err}
-					}
-					found := false
-					for i, a := range access {
-						if a.Bucket == bucket.name {
-							access[i].Permission = newPerm
-							found = true
-							break
-						}
-					}
-					if !found {
-						access = append(access, model.BucketAccess{Bucket: bucket.name, Permission: newPerm})
-					}
-					err = m.client.SetUserBucketAccess(ctx, username, access)
-					if err != nil {
-						return errMsg{err: err}
-					}
-					return bucketAccessUpdatedMsg{
-						bucket:  bucket.name,
-						message: fmt.Sprintf("Updated %s to %s", username, newPerm),
-						users:   updatedUsers,
-					}
-				}
+				m.pendingUser = m.bucketUsers[idx].username
+				m.mode = bucketDetailPickPerm
 			}
-		case "prefixes":
+		} else {
 			return m.toggleSelected()
 		}
 	case "a":
-		// Add user — available from bucket toggle or user section
-		section := m.cursorSection()
-		if (section == "bucket" || section == "users") && !m.bucketUsersLoading {
-			m.mode = bucketDetailPickUser
-			m.userPickerCursor = 0
-			m.loading = true
-			return m, func() tea.Msg {
-				ctx := context.Background()
-				users, err := m.client.ListManagedUsers(ctx)
-				if err != nil {
-					return errMsg{err: err}
-				}
-				items := make([]userItem, len(users))
-				for i, u := range users {
-					items[i] = userItem{
-						name:     u.Name,
-						keyCount: u.KeyCount,
-						created:  u.CreateDate.Format("2006-01-02"),
-					}
-				}
-				return userPickerLoadedMsg{bucket: m.currentBucketName(), items: items}
+		if m.bucketUsersLoading {
+			return m, nil
+		}
+		m.mode = bucketDetailPickUser
+		m.loading = true
+		m.userPickerCursor = 0
+		bucket := m.currentBucketName()
+		return m, func() tea.Msg {
+			users, err := m.client.ListManagedUsers(context.Background())
+			if err != nil {
+				return bucketErrorMsg{err: err, bucket: bucket}
 			}
+			items := make([]userItem, len(users))
+			for i, u := range users {
+				items[i] = userItem{name: u.Name, keyCount: u.KeyCount, created: u.CreateDate.Format("2006-01-02")}
+			}
+			return userPickerLoadedMsg{bucket: bucket, items: items}
 		}
 	case "d":
-		section := m.cursorSection()
-		switch section {
-		case "users":
-			// Remove user access
-			idx := m.userIndex()
-			if idx >= 0 && idx < len(m.bucketUsers) {
-				m.mode = bucketDetailConfirmRemoveUser
-			}
-		case "prefixes":
-			// Delete selected prefix
-			idx := m.prefixIndex()
-			if idx >= 0 && idx < len(m.prefixes) {
-				p := m.prefixes[idx]
-				bucket := m.items[m.cursor]
-				m.loading = true
-				m.deleteProgress = "Counting objects..."
-				return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-					ctx := context.Background()
-					count, err := m.client.CountObjects(ctx, bucket.name, p.prefix, bucket.region)
-					if err != nil {
-						return errMsg{err: err}
-					}
-					return folderCountedMsg{name: p.prefix, key: p.prefix, count: count, isPublic: p.isPublic}
-				})
-			}
+		if m.cursorSection() == "users" && m.userIndex() >= 0 && m.userIndex() < len(m.bucketUsers) {
+			m.mode = bucketDetailConfirmRemoveUser
 		}
-	case "c":
-		m.mode = bucketDetailAddPrefix
-		m.prefixInput.SetValue("")
-		m.prefixInput.Focus()
-		return m, textinput.Blink
-	case "n":
-		// Create a new folder at the bucket root. Uses the same flow as
-		// the browse view's "new folder" so the user drops into the new
-		// folder immediately and can upload from there.
-		m.browsePrefix = ""
-		m.mode = bucketDetailAddFolder
-		m.prefixInput.SetValue("")
-		m.prefixInput.Focus()
-		return m, textinput.Blink
-	case "p":
-		// Upload a local file to the bucket root.
-		m.browsePrefix = ""
-		fp := newFilePicker()
-		fp.width = m.width
-		fp.height = m.height
-		fp = fp.loadDir()
-		m.filePicker = fp
-		m.showFilePicker = true
-		return m, nil
-	case "U":
-		// Upload from a URL to the bucket root.
-		m.browsePrefix = ""
-		bucket := m.items[m.cursor]
-		um := newURLUpload(m.client, bucket.name, bucket.region, m.browsePrefix)
-		um.width = m.width
-		m.urlUpload = &um
-		return m, m.urlUpload.Init()
-	case "r":
-		m.loading = true
-		m.detailMessage = ""
-		m.bucketUsersLoading = true
-		m.bucketUsersError = ""
-		return m, tea.Batch(m.spinner.Tick, m.loadPrefixes(), m.loadBucketUsers())
-	case "left", "h", "esc":
-		if m.directBucket {
-			return m, tea.Quit
-		}
-		m.mode = bucketsList
-		m.detailMessage = ""
-		m.prefixes = nil
-		m.bucketUsers = nil
-		m.bucketUsersError = ""
-		m.loading = true
-		return m, m.init()
+	}
+	_, m.accessOffset = viewportBounds(m.detailCursor, m.accessOffset, maxRow+1, m.browseVisibleRows())
+	return m, nil
+}
+
+func (m bucketsModel) leaveBucket() (bucketsModel, tea.Cmd) {
+	nextRequest(m.metadataRequests)
+	nextRequest(m.browseRequests)
+	nextRequest(m.prefixRequests)
+	nextRequest(m.userRequests)
+	m.clearFilter()
+	m.mode = bucketsList
+	m.browsePrefix = ""
+	m.browseItems = nil
+	m.fullBrowse = nil
+	m.browseSelected = nil
+	m.detailMessage = ""
+	if m.directBucket {
+		return m, tea.Quit
 	}
 	return m, nil
 }
 
 func (m bucketsModel) updateBucketDetailPickUser(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
+	if m.userPickerSource == nil {
+		m.userPickerSource = append([]userItem{}, m.availableUsers...)
+	}
+	if msg.String() == "esc" && !m.userPickerFilter.active && m.userPickerFilter.query != "" {
+		m.userPickerFilter.active = true
+	}
+	if m.userPickerFilter.key(msg) {
+		m.availableUsers = nil
+		for _, item := range m.userPickerSource {
+			if m.userPickerFilter.matches(item.name) {
+				m.availableUsers = append(m.availableUsers, item)
+			}
+		}
+		m.userPickerCursor = 0
+		m.userPickerOffset = 0
+		return m, nil
+	}
 	switch msg.String() {
 	case "up", "k":
 		if m.userPickerCursor > 0 {
@@ -946,6 +1136,10 @@ func (m bucketsModel) updateBucketDetailPickUser(msg tea.KeyMsg) (bucketsModel, 
 		if m.userPickerCursor < len(m.availableUsers)-1 {
 			m.userPickerCursor++
 		}
+	case "pgup":
+		m.userPickerCursor = max(0, m.userPickerCursor-m.browseVisibleRows())
+	case "pgdown":
+		m.userPickerCursor = min(max(0, len(m.availableUsers)-1), m.userPickerCursor+m.browseVisibleRows())
 	case "enter":
 		if len(m.availableUsers) > 0 && m.userPickerCursor < len(m.availableUsers) {
 			m.pendingUser = m.availableUsers[m.userPickerCursor].name
@@ -956,73 +1150,58 @@ func (m bucketsModel) updateBucketDetailPickUser(msg tea.KeyMsg) (bucketsModel, 
 		m.availableUsers = nil
 		m.userPickerCursor = 0
 	}
+	m.userPickerCursor, m.userPickerOffset = viewportBounds(m.userPickerCursor, m.userPickerOffset, len(m.availableUsers), m.browseVisibleRows())
 	return m, nil
 }
 
 func (m bucketsModel) updateBucketDetailPickPerm(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
-	var perm model.PermissionLevel
-	switch msg.String() {
-	case "1":
-		perm = model.PermRead
-	case "2":
-		perm = model.PermReadWrite
-	case "3":
-		perm = model.PermReadWriteDelete
-	case "esc":
+	if msg.String() == "esc" {
 		m.mode = bucketDetail
 		m.pendingUser = ""
 		return m, nil
-	default:
+	}
+	perms := map[string]model.PermissionLevel{"1": model.PermRead, "2": model.PermReadWrite, "3": model.PermReadWriteDelete}
+	perm, ok := perms[msg.String()]
+	if !ok {
 		return m, nil
 	}
-
 	bucket := m.items[m.cursor]
 	username := m.pendingUser
-	m.loading = true
-	m.mode = bucketDetail
-	m.pendingUser = ""
-
-	return m, func() tea.Msg {
-		ctx := context.Background()
-		// Get user's current access and upsert this bucket entry.
+	old := "None"
+	for _, u := range m.bucketUsers {
+		if u.username == username {
+			old = string(u.permission)
+		}
+	}
+	m.confirmAction = fmt.Sprintf("Apply access for %s on s3://%s? Current: %s. Requested: %s.", username, bucket.name, old, perm)
+	m.mode = bucketDetailConfirm
+	m.confirmInput2.SetValue("")
+	m.confirmInput2.Focus()
+	m.confirmFunc = func(ctx context.Context) tea.Msg {
 		access, err := m.client.GetUserBucketAccess(ctx, username)
 		if err != nil {
-			return errMsg{err: err}
+			return bucketErrorMsg{err: err, bucket: bucket.name}
 		}
 		found := false
-		for i, a := range access {
-			if a.Bucket == bucket.name {
+		for i := range access {
+			if access[i].Bucket == bucket.name {
 				access[i].Permission = perm
 				found = true
-				break
 			}
 		}
 		if !found {
 			access = append(access, model.BucketAccess{Bucket: bucket.name, Permission: perm})
 		}
-		err = m.client.SetUserBucketAccess(ctx, username, access)
+		if err := m.client.SetUserBucketAccess(ctx, username, access); err != nil {
+			return bucketErrorMsg{err: err, bucket: bucket.name}
+		}
+		users, err := m.client.ListBucketUsers(ctx, bucket.name)
 		if err != nil {
-			return errMsg{err: err}
+			return bucketErrorMsg{err: fmt.Errorf("Access saved; refresh failed: %w", err), bucket: bucket.name}
 		}
-		users := make([]model.UserPermission, 0, len(m.bucketUsers)+1)
-		replaced := false
-		for _, item := range m.bucketUsers {
-			if item.username == username {
-				users = append(users, model.UserPermission{Username: username, Permission: perm})
-				replaced = true
-				continue
-			}
-			users = append(users, model.UserPermission{Username: item.username, Permission: item.permission})
-		}
-		if !replaced {
-			users = append(users, model.UserPermission{Username: username, Permission: perm})
-		}
-		return bucketAccessUpdatedMsg{
-			bucket:  bucket.name,
-			message: fmt.Sprintf("Added %s with %s access", username, perm),
-			users:   users,
-		}
+		return bucketAccessUpdatedMsg{bucket: bucket.name, users: users, message: fmt.Sprintf("Applied %s access for %s", perm, username)}
 	}
+	return m, textinput.Blink
 }
 
 func (m bucketsModel) updateBucketDetailConfirmRemoveUser(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
@@ -1034,14 +1213,17 @@ func (m bucketsModel) updateBucketDetailConfirmRemoveUser(msg tea.KeyMsg) (bucke
 			bucket := m.items[m.cursor]
 			username := u.username
 			m.loading = true
+			m.mutationPending = true
 			m.mode = bucketDetail
 
+			ctx, cancel := context.WithCancel(context.Background())
+			m.mutationCancel = cancel
 			return m, func() tea.Msg {
-				ctx := context.Background()
+				defer cancel()
 				// Get user's full access, remove entry for this bucket
 				access, err := m.client.GetUserBucketAccess(ctx, username)
 				if err != nil {
-					return errMsg{err: err}
+					return bucketErrorMsg{err: err}
 				}
 				updated := make([]model.BucketAccess, 0, len(access))
 				for _, a := range access {
@@ -1051,7 +1233,7 @@ func (m bucketsModel) updateBucketDetailConfirmRemoveUser(msg tea.KeyMsg) (bucke
 				}
 				err = m.client.SetUserBucketAccess(ctx, username, updated)
 				if err != nil {
-					return errMsg{err: err}
+					return bucketErrorMsg{err: err}
 				}
 				users := make([]model.UserPermission, 0, len(m.bucketUsers)-1)
 				for _, item := range m.bucketUsers {
@@ -1076,66 +1258,36 @@ func (m bucketsModel) updateBucketDetailConfirmRemoveUser(msg tea.KeyMsg) (bucke
 
 func (m bucketsModel) toggleSelected() (bucketsModel, tea.Cmd) {
 	bucket := m.items[m.cursor]
-
-	if m.detailCursor == 0 {
-		// Toggle whole bucket
-		if bucket.isPublic {
-			// Making private -- no warning needed
-			m.loading = true
-			return m, func() tea.Msg {
-				ctx := context.Background()
-				err := m.client.SetPrefixPrivate(ctx, bucket.name, "", bucket.region)
-				if err != nil {
-					return errMsg{err: err}
-				}
-				return operationDoneMsg{message: fmt.Sprintf("Set %s to PRIVATE", bucket.name)}
-			}
-		}
-		// Making public -- requires confirmation
-		m.confirmAction = fmt.Sprintf("This will make the ENTIRE bucket %q publicly readable.", bucket.name)
-		m.confirmFunc = func() tea.Msg {
-			ctx := context.Background()
-			err := m.client.SetPrefixPublic(ctx, bucket.name, "", bucket.region)
-			if err != nil {
-				return errMsg{err: err}
-			}
-			return operationDoneMsg{message: fmt.Sprintf("Set %s to PUBLIC", bucket.name)}
-		}
-		m.mode = bucketDetailConfirm
-		m.confirmInput2.SetValue("")
-		m.confirmInput2.Focus()
-		return m, textinput.Blink
-	}
-
-	// Toggle a prefix (offset by user rows)
-	idx := m.prefixIndex()
-	if idx < 0 || idx >= len(m.prefixes) {
+	if !bucket.policyKnown {
+		m.err = fmt.Errorf("public policy is unknown; refresh Access before editing")
 		return m, nil
 	}
-	p := m.prefixes[idx]
-
-	if p.isPublic {
-		// Making private -- no warning needed
-		m.loading = true
-		return m, func() tea.Msg {
-			ctx := context.Background()
-			err := m.client.SetPrefixPrivate(ctx, bucket.name, p.prefix, bucket.region)
-			if err != nil {
-				return errMsg{err: err}
-			}
-			return operationDoneMsg{message: fmt.Sprintf("Set %s%s to PRIVATE", bucket.name+"/", p.prefix)}
+	prefix := ""
+	current := bucket.managedPublic
+	if m.detailCursor > len(m.bucketUsers) {
+		idx := m.prefixIndex()
+		if idx < 0 || idx >= len(m.prefixes) {
+			return m, nil
 		}
+		prefix = m.prefixes[idx].prefix
+		current = m.prefixes[idx].isPublic
 	}
-
-	// Making public -- requires confirmation
-	m.confirmAction = fmt.Sprintf("Making %s%s public requires changing the bucket's public access settings.", bucket.name+"/", p.prefix)
-	m.confirmFunc = func() tea.Msg {
-		ctx := context.Background()
-		err := m.client.SetPrefixPublic(ctx, bucket.name, p.prefix, bucket.region)
-		if err != nil {
-			return errMsg{err: err}
+	action := "Add managed public read grant"
+	if current {
+		action = "Remove managed public read grant"
+	}
+	m.confirmAction = fmt.Sprintf("%s for s3://%s/%s? This changes the bucket policy and public settings. Other grants may still apply.", action, bucket.name, prefix)
+	m.confirmFunc = func(ctx context.Context) tea.Msg {
+		var err error
+		if current {
+			err = m.client.SetPrefixPrivate(ctx, bucket.name, prefix, bucket.region)
+		} else {
+			err = m.client.SetPrefixPublic(ctx, bucket.name, prefix, bucket.region)
 		}
-		return operationDoneMsg{message: fmt.Sprintf("Set %s%s to PUBLIC", bucket.name+"/", p.prefix)}
+		if err != nil {
+			return bucketErrorMsg{err: err, bucket: bucket.name}
+		}
+		return operationDoneMsg{message: "Applied public access change. Refresh Access to inspect current settings."}
 	}
 	m.mode = bucketDetailConfirm
 	m.confirmInput2.SetValue("")
@@ -1169,7 +1321,7 @@ func (m bucketsModel) updateDetailAddPrefix(msg tea.KeyMsg) (bucketsModel, tea.C
 			ctx := context.Background()
 			err := m.client.CreatePrefix(ctx, bucket.name, name, bucket.region)
 			if err != nil {
-				return errMsg{err: err}
+				return bucketErrorMsg{err: err}
 			}
 			return operationDoneMsg{message: fmt.Sprintf("Added prefix %s (private by default)", name)}
 		}
@@ -1193,7 +1345,11 @@ func (m bucketsModel) updateBrowseAddFolder(msg tea.KeyMsg) (bucketsModel, tea.C
 		}
 		newKey := m.browsePrefix + raw + "/"
 		// Reject duplicates within the current view
-		for _, item := range m.browseItems {
+		entries := m.fullBrowse
+		if entries == nil {
+			entries = m.browseItems
+		}
+		for _, item := range entries {
 			if item.Key == newKey {
 				m.detailMessage = fmt.Sprintf("Folder %q already exists here", raw)
 				m.mode = bucketDetail
@@ -1207,12 +1363,15 @@ func (m bucketsModel) updateBrowseAddFolder(msg tea.KeyMsg) (bucketsModel, tea.C
 		}
 		bucket := m.items[m.cursor]
 		m.loading = true
+		m.mutationPending = true
 		m.mode = bucketDetail
+		ctx, cancel := context.WithCancel(context.Background())
+		m.mutationCancel = cancel
 		return m, func() tea.Msg {
-			ctx := context.Background()
+			defer cancel()
 			err := m.client.CreatePrefix(ctx, bucket.name, newKey, bucket.region)
 			if err != nil {
-				return errMsg{err: err}
+				return bucketErrorMsg{err: err, kind: "folder", bucket: bucket.name}
 			}
 			return browseFolderCreatedMsg{
 				prefix:  newKey,
@@ -1239,8 +1398,12 @@ func (m bucketsModel) updateDetailConfirm(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 			return m, nil
 		}
 		m.loading = true
+		m.mutationPending = true
 		m.mode = bucketDetail
-		return m, m.confirmFunc
+		ctx, cancel := context.WithCancel(context.Background())
+		m.mutationCancel = cancel
+		action := m.confirmFunc
+		return m, func() tea.Msg { defer cancel(); return action(ctx) }
 	case "esc":
 		m.mode = bucketDetail
 		return m, nil
@@ -1254,62 +1417,73 @@ func (m bucketsModel) updateDetailConfirm(msg tea.KeyMsg) (bucketsModel, tea.Cmd
 // loadPrefixes fetches prefix list and access status for the currently selected bucket.
 func (m bucketsModel) loadPrefixes() tea.Cmd {
 	bucket := m.items[m.cursor]
+	request := nextRequest(m.prefixRequests)
 	return func() tea.Msg {
 		ctx := context.Background()
 		prefixNames, err := m.client.ListPrefixes(ctx, bucket.name, bucket.region)
 		if err != nil {
-			return errMsg{err: err}
+			return bucketErrorMsg{err: err, kind: "prefixes", bucket: bucket.name, request: request}
 		}
-		accesses, err := m.client.GetPrefixAccessStatus(ctx, bucket.name, bucket.region, prefixNames)
+		accesses, err := m.client.GetPrefixAccessStatus(ctx, bucket.name, bucket.region, append([]string{""}, prefixNames...))
 		if err != nil {
-			return errMsg{err: err}
+			return bucketErrorMsg{err: err, kind: "prefixes", bucket: bucket.name, request: request}
 		}
-		items := make([]prefixItem, len(accesses))
-		for i, a := range accesses {
-			items[i] = prefixItem{prefix: a.Prefix, isPublic: a.IsPublic}
+		items := make([]prefixItem, 0, len(prefixNames))
+		rootPublic := false
+		for _, a := range accesses {
+			if a.Prefix == "" {
+				rootPublic = a.IsPublic
+				continue
+			}
+			items = append(items, prefixItem{prefix: a.Prefix, isPublic: a.IsPublic})
 		}
-		return prefixesLoadedMsg{bucket: bucket.name, prefixes: items}
+		return prefixesLoadedMsg{bucket: bucket.name, prefixes: items, request: request, rootPublic: rootPublic, known: true}
 	}
 }
 
 func (m bucketsModel) loadDirectBucketMetadata() tea.Cmd {
 	bucket := m.items[m.cursor]
+	request := nextRequest(m.metadataRequests)
 	return func() tea.Msg {
 		ctx := context.Background()
 		item := bucket
 
-		if buckets, err := m.client.ListBuckets(ctx); err == nil {
-			for _, b := range buckets {
-				if b.Name != bucket.name {
-					continue
+		if m.directBucket && item.created == "" {
+			if buckets, err := m.client.ListBuckets(ctx); err == nil {
+				for _, b := range buckets {
+					if b.Name != bucket.name {
+						continue
+					}
+					item.region = b.Region
+					item.created = b.CreationDate.Format("2006-01-02")
+					break
 				}
-				item.region = b.Region
-				item.created = b.CreationDate.Format("2006-01-02")
-				break
 			}
 		}
 
-		stats, _ := m.client.GetBucketStats(ctx, bucket.name, item.region)
+		stats, statsErr := m.client.GetBucketStats(ctx, bucket.name, item.region)
 		item.objects = stats.ObjectCount
 		item.sizeBytes = stats.SizeBytes
+		item.statsKnown = statsErr == nil && stats.Known
+		item.statsUpdated = stats.UpdatedAt
 
-		accesses, _ := m.client.GetPrefixAccessStatus(ctx, bucket.name, item.region, []string{""})
-		item.isPublic = len(accesses) > 0 && accesses[0].IsPublic
+		item.isPublic, item.accessKnown, _ = m.client.PublicAccessStatus(ctx, bucket.name, item.region)
 
-		return directBucketMetadataLoadedMsg{bucket: item}
+		return directBucketMetadataLoadedMsg{bucket: item, request: request}
 	}
 }
 
 // loadBucketUsers fetches the list of users with access to the currently selected bucket.
 func (m bucketsModel) loadBucketUsers() tea.Cmd {
 	bucket := m.items[m.cursor]
+	request := nextRequest(m.userRequests)
 	return func() tea.Msg {
 		ctx := context.Background()
 		users, err := m.client.ListBucketUsers(ctx, bucket.name)
 		if err != nil {
-			return bucketUsersLoadedMsg{bucket: bucket.name, err: err}
+			return bucketUsersLoadedMsg{bucket: bucket.name, err: err, request: request}
 		}
-		return bucketUsersLoadedMsg{bucket: bucket.name, users: users}
+		return bucketUsersLoadedMsg{bucket: bucket.name, users: users, request: request}
 	}
 }
 
@@ -1348,11 +1522,11 @@ func (m bucketsModel) renderTransferProgress() string {
 		eta := ""
 		if rateVal := progress.ParseRateBytesPerSec(rate); rateVal > 0 {
 			remaining := float64(snap.Total-snap.Done) / rateVal
-			eta = " — ETA " + progress.FormatDuration(time.Duration(remaining*float64(time.Second)))
+			eta = " - ETA " + progress.FormatDuration(time.Duration(remaining*float64(time.Second)))
 		}
-		status = fmt.Sprintf("%s / %s (%.0f%%) — %s%s", done, total, pct, rate, eta)
+		status = fmt.Sprintf("%s / %s (%.0f%%) - %s%s", done, total, pct, rate, eta)
 	} else {
-		status = fmt.Sprintf("%s — %s", done, rate)
+		status = fmt.Sprintf("%s - %s", done, rate)
 	}
 
 	return fmt.Sprintf("  %s\n  %s\n  %s\n", label, bar, dimStyle.Render(status))
@@ -1360,7 +1534,8 @@ func (m bucketsModel) renderTransferProgress() string {
 
 // --- Views ---
 
-func (m bucketsModel) view() string {
+func (m bucketsModel) view() (content string) {
+	defer func() { content = fitTerminal(content, m.width, m.height) }()
 	switch m.mode {
 	case bucketDetail, bucketDetailAddPrefix, bucketDetailAddFolder, bucketDetailConfirm, bucketDetailDeleteFolder, bucketDetailDeleteSelection:
 		return m.viewDetail()
@@ -1375,431 +1550,23 @@ func (m bucketsModel) view() string {
 	}
 }
 
-func (m bucketsModel) viewList() string {
-	tableWidth := colName + colRegion + colStatus + colCount + colSize + colCreated + 12 // gaps between cols + left pad
-	if m.width > tableWidth {
-		tableWidth = m.width
-	}
-
-	s := breadcrumbStyle.Render("dashboard > buckets") + "\n"
-	s += screenTitleStyle.Render(fmt.Sprintf("Buckets (%d)", len(m.items))) + "\n"
-	s += separator(tableWidth) + "\n"
-
-	if m.message != "" {
-		s += " " + successStyle.Render(m.message) + "\n"
-	}
-
-	switch m.mode {
-	case bucketsCreate:
-		s += " New bucket name:\n"
-		s += " " + m.nameInput.View() + "\n\n"
-		s += helpStyle.Render(" enter: create  esc: cancel")
-		return s
-	case bucketsTypeDelete:
-		if m.cursor < len(m.items) {
-			s += fmt.Sprintf("\n Delete bucket %s\n", warningStyle.Render(m.items[m.cursor].name))
-			s += " Type 'delete' to proceed:\n"
-			s += " " + m.deleteInput.View() + "\n\n"
-			s += helpStyle.Render(" enter: proceed  esc: cancel")
-		}
-		return s
-	case bucketsConfirmDelete:
-		if m.cursor < len(m.items) {
-			s += fmt.Sprintf("\n "+warningStyle.Render("Are you sure you want to delete %q?")+" [y/N]", m.items[m.cursor].name)
-		}
-		return s
-	case bucketsConfirmDeleteNonEmpty:
-		if m.cursor < len(m.items) {
-			bucket := m.items[m.cursor]
-			s += "\n"
-			s += " " + warningStyle.Render("This bucket is not empty.") + "\n"
-			s += " " + warningStyle.Render("ALL objects will be permanently deleted.") + "\n\n"
-			s += fmt.Sprintf(" Type %s to confirm:\n", warningStyle.Render(bucket.name))
-			s += " " + m.confirmInput.View() + "\n\n"
-			s += helpStyle.Render(" enter: delete everything  esc: cancel")
-		}
-		return s
-	}
-
-	if m.loading {
-		if m.deleteProgress != "" {
-			s += fmt.Sprintf(" %s %s\n", m.spinner.View(), m.deleteProgress)
-		} else {
-			s += fmt.Sprintf(" %s Loading buckets...\n", m.spinner.View())
-		}
-		return s
-	}
-
-	if len(m.items) == 0 {
-		s += " No buckets found.\n\n"
-		s += helpStyle.Render(" [c] Create  [esc] Back")
-		return s
-	}
-
-	// Table header row
-	header := fmt.Sprintf(" %s  %s  %s  %s  %s  %s",
-		pad("NAME", colName),
-		pad("REGION", colRegion),
-		pad("", colStatus),
-		padRight("OBJECTS", colCount),
-		padRight("SIZE", colSize),
-		pad("CREATED", colCreated))
-	s += tableHeaderStyle.Width(tableWidth).Render(header) + "\n"
-
-	visible := m.visibleRows()
-	end := m.offset + visible
-	if end > len(m.items) {
-		end = len(m.items)
-	}
-
-	if m.offset > 0 {
-		s += dimStyle.Render(fmt.Sprintf(" ▲ %d more above", m.offset)) + "\n"
-	}
-
-	for i := m.offset; i < end; i++ {
-		b := m.items[i]
-		name := truncate(b.name, colName)
-		region := pad(b.region, colRegion)
-		count := padRight(formatCount(b.objects), colCount)
-		size := padRight(formatSize(b.sizeBytes), colSize)
-		created := pad(b.created, colCreated)
-		url := ""
-		if b.isPublic {
-			url = "  " + dimStyle.Render(publicURL(b.name, ""))
-		}
-
-		if i == m.cursor {
-			icon := accessIconSelected(b.isPublic)
-			row := fmt.Sprintf(" %s  %s  %s  %s  %s  %s",
-				pad(name, colName), region, icon, count, size, created)
-			if b.isPublic {
-				row += "  " + publicURL(b.name, "")
-			}
-			s += rowSelectedStyle.Width(tableWidth).Render(row) + "\n"
-		} else {
-			icon := accessIcon(b.isPublic)
-			row := fmt.Sprintf(" %s  %s  %s  %s  %s  %s%s",
-				pad(name, colName), region, icon, count, size, created, url)
-			s += rowStyle.Render(row) + "\n"
-		}
-	}
-
-	if end < len(m.items) {
-		s += dimStyle.Render(fmt.Sprintf(" ▼ %d more below", len(m.items)-end)) + "\n"
-	}
-
-	s += "\n" + helpStyle.Render(" [enter/→] Detail  [c] Create  [d] Delete  [r] Refresh  [u] Users  [q] Quit")
-	return s
-}
-
-func (m bucketsModel) viewDetail() string {
-	if m.cursor >= len(m.items) {
-		return ""
-	}
-	bucket := m.items[m.cursor]
-
-	// Breadcrumb includes browse path when drilling into contents
-	crumb := fmt.Sprintf("dashboard > buckets > %s", bucket.name)
-	if m.browsePrefix != "" {
-		crumb += " > /" + m.browsePrefix
-	}
-	s := breadcrumbStyle.Render(crumb) + "\n"
-	s += screenTitleStyle.Render(bucket.name) + "\n"
-
-	detailWidth := 60
-	if m.width > detailWidth {
-		detailWidth = m.width
-	}
-	s += separator(detailWidth) + "\n"
-
-	if m.detailMessage != "" {
-		s += " " + successStyle.Render(m.detailMessage) + "\n"
-	}
-
-	if m.loading {
-		if m.deleteProgress != "" {
-			s += fmt.Sprintf("\n %s %s\n", m.spinner.View(), m.deleteProgress)
-			if m.bulkDeleting {
-				s += helpStyle.Render(" [esc] Cancel")
-			}
-		} else {
-			s += fmt.Sprintf("\n %s Loading...\n", m.spinner.View())
-		}
-		return s
-	}
-
-	// Bucket metadata
-	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
-	valueStyle := lipgloss.NewStyle().Foreground(colorText)
-	s += "\n"
-	s += fmt.Sprintf("  %s   %s\n", labelStyle.Render("Region:"), valueStyle.Render(bucket.region))
-	s += fmt.Sprintf("  %s  %s\n", labelStyle.Render("Objects:"), valueStyle.Render(formatCount(bucket.objects)))
-	s += fmt.Sprintf("  %s     %s\n", labelStyle.Render("Size:"), valueStyle.Render(formatSize(bucket.sizeBytes)))
-	created := bucket.created
-	if created == "" {
-		created = "Unknown"
-	}
-	s += fmt.Sprintf("  %s  %s\n", labelStyle.Render("Created:"), valueStyle.Render(created))
-	s += "\n"
-
-	// Bucket-level access toggle (row 0)
-	bucketAccessLabel := accessIcon(bucket.isPublic) + " " + accessWord(bucket.isPublic)
-	if bucket.isPublic {
-		bucketAccessLabel += "  " + dimStyle.Render(publicURL(bucket.name, ""))
-	}
-	if m.detailCursor == 0 {
-		row := fmt.Sprintf("  Bucket Access: %s", bucketAccessLabel)
-		s += rowSelectedStyle.Width(detailWidth).Render(row) + "\n"
-	} else {
-		row := fmt.Sprintf("  Bucket Access: %s", bucketAccessLabel)
-		s += rowStyle.Render(row) + "\n"
-	}
-
-	// USER ACCESS section
-	if m.bucketUsersLoading {
-		s += "\n  " + dimStyle.Render("Loading user access...") + "\n"
-	} else {
-		s += "\n"
-		s += fmt.Sprintf("  %s\n", tableHeaderStyle.Render(fmt.Sprintf("  %-30s %s", fmt.Sprintf("USER ACCESS (%d)", len(m.bucketUsers)), "PERMISSION")))
-		if m.bucketUsersError != "" {
-			s += "  " + errorStyle.Render(m.bucketUsersError) + "\n"
-		} else if len(m.bucketUsers) == 0 {
-			s += "  " + dimStyle.Render("No users assigned.") + "\n"
-		} else {
-			for i, u := range m.bucketUsers {
-				cursor := "  "
-				if m.detailCursor == i+1 {
-					cursor = "> "
-				}
-				uname := pad(u.username, 30)
-				permStr := string(u.permission)
-				if m.detailCursor == i+1 {
-					uname = rowSelectedStyle.Render(pad(u.username, 30))
-					permStr = rowSelectedStyle.Render(string(u.permission))
-				}
-				s += fmt.Sprintf("%s  %s  %s\n", cursor, uname, permStr)
-			}
-		}
-	}
-
-	s += "\n"
-
-	// When URL upload modal is active, render it instead of the browse/prefix view
-	if m.urlUpload != nil {
-		m.urlUpload.width = m.width
-		s += m.urlUpload.View()
-		return s
-	}
-
-	// When file picker is active, render it instead of the browse/prefix view
-	if m.showFilePicker {
-		s += m.filePicker.view(detailWidth)
-		return s
-	}
-
-	// Show browse items if we've drilled into a prefix, otherwise show prefix list
-	if len(m.browseItems) > 0 || m.browsePrefix != "" {
-		// Browsing contents
-		if bucket.isPublic {
-			s += " " + dimStyle.Render(publicURL(bucket.name, m.browsePrefix)) + "\n"
-		}
-
-		if len(m.browseItems) == 0 {
-			s += "\n " + dimStyle.Render("Empty — no files or folders here.") + "\n"
-		} else {
-			header := fmt.Sprintf(" %s  %s  %s",
-				pad("NAME", 40), padRight("SIZE", 10), pad("MODIFIED", 20))
-			s += tableHeaderStyle.Width(detailWidth).Render(header) + "\n"
-
-			visible := m.browseVisibleRows()
-			end := m.browseOffset + visible
-			if end > len(m.browseItems) {
-				end = len(m.browseItems)
-			}
-			if m.browseOffset > 0 {
-				s += dimStyle.Render(fmt.Sprintf(" ▲ %d more above", m.browseOffset)) + "\n"
-			}
-			for i := m.browseOffset; i < end; i++ {
-				item := m.browseItems[i]
-				var icon, name, sz, mod string
-				if item.IsFolder {
-					icon = "\U0001F4C1 "
-					name = item.Name
-				} else {
-					icon = "   "
-					name = item.Name
-					sz = formatSize(item.Size)
-					if !item.LastModified.IsZero() {
-						mod = item.LastModified.Format("2006-01-02 15:04")
-					}
-				}
-				marker := "[ ] "
-				if m.browseSelected[item.Key] {
-					marker = "[x] "
-				}
-				display := marker + icon + pad(name, 33)
-				row := fmt.Sprintf(" %s  %s  %s", display, padRight(sz, 10), pad(mod, 20))
-				if i == m.browseCursor {
-					s += rowSelectedStyle.Width(detailWidth).Render(row) + "\n"
-				} else {
-					s += rowStyle.Render(row) + "\n"
-				}
-			}
-			if end < len(m.browseItems) {
-				s += dimStyle.Render(fmt.Sprintf(" ▼ %d more below", len(m.browseItems)-end)) + "\n"
-			}
-
-			// Show selected item URL for public buckets
-			if bucket.isPublic && m.browseCursor < len(m.browseItems) {
-				s += "\n " + lipgloss.NewStyle().Foreground(colorPrimary).Render(
-					publicURL(bucket.name, m.browseItems[m.browseCursor].Key))
-			}
-		}
-
-		// Confirm overlay (for file delete while browsing)
-		if m.mode == bucketDetailConfirm {
-			s += "\n"
-			s += "  " + warningStyle.Render(m.confirmAction) + "\n"
-			s += "  " + warningStyle.Render("Type \"yes\" to confirm:") + "\n"
-			s += "  " + m.confirmInput2.View() + "\n\n"
-			s += helpStyle.Render("  enter: confirm  esc: cancel")
-			return s
-		}
-
-		// Folder delete confirm overlay
-		if m.mode == bucketDetailDeleteFolder {
-			s += "\n"
-			s += "  " + warningStyle.Render(fmt.Sprintf("This will delete %s files in %s", formatWithCommas(m.folderDeleteCnt), m.folderDeleteKey)) + "\n"
-			s += "  " + warningStyle.Render("Type 'delete' to continue:") + "\n"
-			s += "  " + m.deleteInput.View() + "\n\n"
-			s += helpStyle.Render("  enter: delete  esc: cancel")
-			return s
-		}
-
-		if m.mode == bucketDetailDeleteSelection {
-			s += "\n"
-			s += "  " + warningStyle.Render(m.confirmAction) + "\n"
-			s += "  " + warningStyle.Render("Folders and everything inside them will be permanently deleted.") + "\n"
-			s += "  " + warningStyle.Render("Type 'delete' to continue:") + "\n"
-			s += "  " + m.deleteInput.View() + "\n\n"
-			s += helpStyle.Render("  enter: delete selected  esc: cancel")
-			return s
-		}
-
-		// New folder name overlay
-		if m.mode == bucketDetailAddFolder {
-			parent := m.browsePrefix
-			if parent == "" {
-				parent = "bucket root"
-			}
-			s += "\n  New folder name (created inside " + parent + "):\n"
-			s += "  " + m.prefixInput.View() + "\n\n"
-			s += helpStyle.Render("  enter: create  esc: cancel")
-			return s
-		}
-
-		if tp := m.renderTransferProgress(); tp != "" {
-			s += "\n" + tp
-			s += helpStyle.Render("  [esc] cancel")
-		} else {
-			s += "\n" + helpStyle.Render("  [space] Select  [a] Select all/clear  [d] Delete  [→] Open  [←] Back  [n] New folder  [g] Download  [p] Upload  [U] URL upload  [c] Copy URL  [r] Refresh  [esc] Prefix list")
-		}
-	} else {
-		// Prefix list
-		if tp := m.renderTransferProgress(); tp != "" {
-			s += "\n" + tp
-			s += helpStyle.Render("  [esc] cancel")
-			return s
-		}
-
-		if len(m.prefixes) > 0 {
-			s += "  " + labelStyle.Render("Prefixes:") + "  " + dimStyle.Render("[→ to browse]") + "\n"
-			s += "  " + lipgloss.NewStyle().Foreground(colorBorder).Render(strings.Repeat("─", 40)) + "\n"
-
-			for i, p := range m.prefixes {
-				icon := accessIcon(p.isPublic)
-				label := accessWord(p.isPublic)
-				url := ""
-				if p.isPublic {
-					url = "  " + dimStyle.Render(publicURL(bucket.name, p.prefix))
-				}
-				row := fmt.Sprintf("    %s  %s %s%s", pad(p.prefix, 30), icon, label, url)
-				if m.detailCursor == len(m.bucketUsers)+i+1 {
-					s += rowSelectedStyle.Width(detailWidth).Render(row) + "\n"
-				} else {
-					s += rowStyle.Render(row) + "\n"
-				}
-			}
-		} else {
-			s += "  " + dimStyle.Render("No prefixes (folders) found.") + "\n"
-		}
-
-		// Sub-mode overlays
-		switch m.mode {
-		case bucketDetailAddPrefix:
-			s += "\n  New prefix name:\n"
-			s += "  " + m.prefixInput.View() + "\n\n"
-			s += helpStyle.Render("  enter: add  esc: cancel")
-			return s
-		case bucketDetailAddFolder:
-			s += "\n  New folder name (created at bucket root):\n"
-			s += "  " + m.prefixInput.View() + "\n\n"
-			s += helpStyle.Render("  enter: create  esc: cancel")
-			return s
-		case bucketDetailConfirm:
-			s += "\n"
-			s += "  " + warningStyle.Render(m.confirmAction) + "\n"
-			s += "  " + warningStyle.Render("Type \"yes\" to confirm:") + "\n"
-			s += "  " + m.confirmInput2.View() + "\n\n"
-			s += helpStyle.Render("  enter: confirm  esc: cancel")
-			return s
-		}
-
-		// Context-sensitive help bar
-		switch m.cursorSection() {
-		case "bucket":
-			s += "\n" + helpStyle.Render("  [enter] Toggle public/private  [a] Add user  [n] New folder  [p] Upload  [U] URL upload  [r] Refresh  [esc] Back")
-		case "users":
-			s += "\n" + helpStyle.Render("  [enter] Cycle permission  [a] Add user  [d] Remove  [n] New folder  [p] Upload  [r] Refresh  [esc] Back")
-		case "prefixes":
-			s += "\n" + helpStyle.Render("  [enter] Toggle access  [→] Browse  [c] Add prefix  [n] New folder  [p] Upload  [d] Delete prefix  [r] Refresh  [←] Back")
-		}
-	}
-	return s
-}
-
 func (m bucketsModel) viewPickUser() string {
-	bucket := m.items[m.cursor]
-	s := breadcrumbStyle.Render(fmt.Sprintf("dashboard > buckets > %s > Add user", bucket.name)) + "\n"
-	s += screenTitleStyle.Render("Select a user:") + "\n\n"
-
+	body := m.userPickerFilter.view(len(m.availableUsers), len(m.userPickerSource))
 	if m.loading {
-		s += fmt.Sprintf(" %s Loading users...\n", m.spinner.View())
-		return s
+		body += "Loading managed users..."
+	} else if len(m.availableUsers) == 0 {
+		body += "No matching users. Clear the filter or refresh Managed users."
 	}
-
-	if len(m.availableUsers) == 0 {
-		s += "  All managed users are already assigned.\n\n"
-		s += helpStyle.Render("  [esc] Back")
-		return s
-	}
-
-	for i, u := range m.availableUsers {
-		cursor := "  "
-		if i == m.userPickerCursor {
-			cursor = "> "
+	rows := m.browseVisibleRows()
+	cursor, offset := viewportBounds(m.userPickerCursor, m.userPickerOffset, len(m.availableUsers), rows)
+	for i := offset; i < min(len(m.availableUsers), offset+rows); i++ {
+		marker := "  "
+		if i == cursor {
+			marker = "> "
 		}
-		name := pad(u.name, 30)
-		created := u.created
-		if i == m.userPickerCursor {
-			name = rowSelectedStyle.Render(pad(u.name, 30))
-			created = rowSelectedStyle.Render(u.created)
-		}
-		s += fmt.Sprintf("%s%s %s\n", cursor, name, created)
+		body += marker + m.availableUsers[i].name + "\n"
 	}
-
-	s += "\n" + helpStyle.Render("  [enter] Select  [esc] Cancel")
-	return s
+	return renderPanel("Assign user to "+m.currentBucketName(), body, "/: Filter  Enter: Select  Esc: Cancel", m.width, m.height)
 }
 
 func (m bucketsModel) viewPickPerm() string {
@@ -1825,34 +1592,27 @@ func (m bucketsModel) viewConfirmRemoveUser() string {
 	return s
 }
 
-// accessWord returns "PUBLIC" or "PRIVATE" as styled text.
-func accessWord(public bool) string {
-	if public {
-		return warningStyle.Render("PUBLIC")
-	}
-	return dimStyle.Render("PRIVATE")
-}
-
 // --- File Browser ---
 
 func (m bucketsModel) loadBrowse() tea.Cmd {
 	bucket := m.items[m.cursor]
 	prefix := m.browsePrefix
+	request := nextRequest(m.browseRequests)
 	return func() tea.Msg {
 		ctx := context.Background()
 		items, err := m.client.ListContents(ctx, bucket.name, prefix, bucket.region)
 		if err != nil {
-			return errMsg{err: err}
+			return bucketErrorMsg{err: err, kind: "browse", bucket: bucket.name, prefix: prefix, request: request}
 		}
-		return browseLoadedMsg{items: items}
+		return browseLoadedMsg{items: items, bucket: bucket.name, prefix: prefix, request: request}
 	}
 }
 
 func (m bucketsModel) browseVisibleRows() int {
-	overhead := 6
+	overhead := 9
 	avail := m.height - overhead
-	if avail < 3 {
-		avail = 3
+	if avail < 1 {
+		avail = 1
 	}
 	return avail
 }
@@ -1860,66 +1620,23 @@ func (m bucketsModel) browseVisibleRows() int {
 func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	// When the file picker is active, delegate all keys to it
 	if m.showFilePicker {
+		ownedInput := m.filePicker.ownsInput()
 		fp, cmd, selected := m.filePicker.update(msg)
 		m.filePicker = fp
 		m.filePicker.width = m.width
 		m.filePicker.height = m.height
-		if msg.String() == "esc" {
+		if msg.String() == "esc" && !ownedInput {
 			m.showFilePicker = false
 			return m, nil
 		}
 		if selected != "" {
 			m.showFilePicker = false
-			bucket := m.items[m.cursor]
-			prefix := m.browsePrefix
-			filename := filepath.Base(selected)
-
-			// Stat to learn the total size for percentage / ETA.
-			var totalSize int64 = -1
-			if info, statErr := os.Stat(selected); statErr == nil {
-				totalSize = info.Size()
-			}
-
-			// Set up the progress snapshot and cancellation context.
-			snap := &atomic.Pointer[progress.Snapshot]{}
-			snap.Store(&progress.Snapshot{Done: 0, Total: totalSize})
-			ctx, cancel := context.WithCancel(context.Background())
-
-			m.transferSnap = snap
-			m.transferLabel = fmt.Sprintf("Uploading %s", filename)
-			m.transferTotal = totalSize
-			m.transferLastDone = 0
-			m.transferLastTime = time.Now()
-			m.transferRate = 0
-			m.transferCancel = cancel
-			m.deleteProgress = ""
-
-			return m, tea.Batch(transferTick(), func() tea.Msg {
-				f, err := os.Open(selected)
-				if err != nil {
-					return errMsg{err: fmt.Errorf("could not open %s: %w", selected, err)}
-				}
-				defer f.Close()
-
-				reader := progress.NewReader(f, func(done int64) {
-					snap.Store(&progress.Snapshot{Done: done, Total: totalSize})
-				})
-
-				key := prefix + filename
-				// Multipart upload: single PutObject caps at 5 GiB, so
-				// stream through the multipart uploader with parts sized
-				// from the file length. The progress reader wraps the
-				// file, so the bar keeps working.
-				if err := m.client.UploadStream(ctx, bucket.name, key, bucket.region, reader, awsClient.AutoPartSize(totalSize), 0); err != nil {
-					return errMsg{err: err}
-				}
-				return uploadDoneMsg{filename: filename}
-			})
+			return m.prepareLocalUpload(selected)
 		}
 		return m, cmd
 	}
 
-	if m.transferSnap != nil && msg.String() != "esc" {
+	if m.transferSnap != nil && msg.String() != "esc" && msg.String() != "ctrl+c" {
 		return m, nil
 	}
 	if m.bulkDeleting {
@@ -1930,6 +1647,11 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "i":
+		if m.browseCursor >= 0 && m.browseCursor < len(m.browseItems) {
+			m.inspectText = "Full object path\ns3://" + m.currentBucketName() + "/" + m.browseItems[m.browseCursor].Key
+			m.dialogOffset = 0
+		}
 	case "up", "k":
 		if m.browseCursor > 0 {
 			m.browseCursor--
@@ -1958,48 +1680,57 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		visible := m.browseVisibleRows()
 		m.browseCursor += visible
 		if m.browseCursor >= len(m.browseItems) {
-			m.browseCursor = len(m.browseItems) - 1
+			m.browseCursor = max(0, len(m.browseItems)-1)
 		}
 		if m.browseCursor >= m.browseOffset+visible {
 			m.browseOffset = m.browseCursor - visible + 1
 		}
-	case "right", "l":
-		// Drill into folder
-		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
+	case "enter", "right", "l":
+		if m.browseCursor >= 0 && m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
+			if m.parentPositions == nil {
+				m.parentPositions = make(map[string]browsePosition)
+			}
+			m.parentPositions[m.browsePrefix] = browsePosition{key: m.browseItems[m.browseCursor].Key, filter: m.filterInput.Value(), cursor: m.browseCursor, offset: m.browseOffset}
+			prefix := m.browseItems[m.browseCursor].Key
+			m.clearFilter()
+			m.browsePrefix = prefix
 			m.browseSelected = nil
-			m.browsePrefix = m.browseItems[m.browseCursor].Key
+			m.browseItems = nil
+			m.fullBrowse = nil
+			m.browseCursor = 0
+			m.browseOffset = 0
 			m.loading = true
 			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 		}
-	case "left", "h":
-		m.browseSelected = nil
-		// Go up one level
-		trimmed := strings.TrimSuffix(m.browsePrefix, "/")
-		lastSlash := strings.LastIndex(trimmed, "/")
-		if lastSlash >= 0 {
-			m.browsePrefix = trimmed[:lastSlash+1]
-			m.loading = true
-			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
-		}
-		// At a top-level prefix — go back to prefix list
-		m.browsePrefix = ""
-		m.browseItems = nil
-		return m, nil
-	case "esc":
+	case "left", "h", "esc":
 		if m.transferSnap != nil && m.transferCancel != nil {
 			m.transferCancel()
+			m.cancelling = true
 			return m, nil
 		}
-		// Esc always goes back to prefix list
-		m.browseSelected = nil
-		m.browsePrefix = ""
-		m.browseItems = nil
-		return m, nil
-	case "enter":
-		// Enter toggles access on the current item if it's a folder
-		if m.browseCursor < len(m.browseItems) && m.browseItems[m.browseCursor].IsFolder {
-			return m.toggleBrowseFolder()
+		if m.browsePrefix == "" {
+			return m.leaveBucket()
 		}
+		m.clearFilter()
+		m.browseSelected = nil
+		trimmed := strings.TrimSuffix(m.browsePrefix, "/")
+		parent := ""
+		if slash := strings.LastIndex(trimmed, "/"); slash >= 0 {
+			parent = trimmed[:slash+1]
+		}
+		m.browsePrefix = parent
+		m.browseItems = nil
+		m.fullBrowse = nil
+		m.loading = true
+		position := m.parentPositions[parent]
+		m.pendingBrowseKey = position.key
+		m.browseCursor = position.cursor
+		m.browseOffset = position.offset
+		if position.filter != "" {
+			m.filterScope = "files"
+			m.filterInput.SetValue(position.filter)
+		}
+		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 	case " ":
 		if m.browseCursor < len(m.browseItems) {
 			if m.browseSelected == nil {
@@ -2022,21 +1753,18 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			}
 		}
 	case "c":
-		if m.browseCursor < len(m.browseItems) {
-			bucket := m.items[m.cursor]
-			item := m.browseItems[m.browseCursor]
-			url := publicURL(bucket.name, item.Key)
-			if err := clipboard.WriteAll(url); err != nil {
-				m.detailMessage = "Clipboard unavailable: " + err.Error()
-			} else {
-				m.detailMessage = "Copied to clipboard"
-			}
-		}
+		return m.updateBrowse(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	case "d":
 		if m.browseCursor < len(m.browseItems) {
 			if len(m.browseSelected) > 0 {
 				files, folders := m.selectedBrowseCounts()
 				m.confirmAction = fmt.Sprintf("Delete %s?", describeBrowseSelection(files, folders))
+				m.pendingDelete = nil
+				for _, item := range m.browseItems {
+					if m.browseSelected[item.Key] {
+						m.pendingDelete = append(m.pendingDelete, item)
+					}
+				}
 				m.mode = bucketDetailDeleteSelection
 				m.deleteInput.SetValue("")
 				m.deleteInput.Focus()
@@ -2045,18 +1773,18 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			item := m.browseItems[m.browseCursor]
 			bucket := m.items[m.cursor]
 			if item.IsFolder {
-				// Folder delete — count objects first (with spinner)
+				// Folder delete - count objects first (with spinner)
 				m.loading = true
 				m.deleteProgress = "Counting objects..."
 				return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
 					ctx := context.Background()
 					count, err := m.client.CountObjects(ctx, bucket.name, item.Key, bucket.region)
 					if err != nil {
-						return errMsg{err: err}
+						return bucketErrorMsg{err: err}
 					}
 					accesses, err := m.client.GetPrefixAccessStatus(ctx, bucket.name, bucket.region, []string{item.Key})
 					if err != nil {
-						return errMsg{err: err}
+						return bucketErrorMsg{err: err}
 					}
 					isPublic := len(accesses) > 0 && accesses[0].IsPublic
 					return folderCountedMsg{name: item.Name, key: item.Key, count: count, isPublic: isPublic}
@@ -2064,11 +1792,10 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			}
 			// File delete
 			m.confirmAction = fmt.Sprintf("Delete file %q?", item.Name)
-			m.confirmFunc = func() tea.Msg {
-				ctx := context.Background()
+			m.confirmFunc = func(ctx context.Context) tea.Msg {
 				err := m.client.DeleteObject(ctx, bucket.name, item.Key, bucket.region)
 				if err != nil {
-					return errMsg{err: err}
+					return bucketErrorMsg{err: err}
 				}
 				return operationDoneMsg{message: fmt.Sprintf("Deleted %s", item.Name)}
 			}
@@ -2078,54 +1805,15 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 			return m, textinput.Blink
 		}
 	case "g":
-		// Download selected file to current working directory
-		if m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
-			item := m.browseItems[m.browseCursor]
+		if m.browseCursor >= 0 && m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
+			return m.prepareDownload(m.browseItems[m.browseCursor])
+		}
+	case "s":
+		if m.browseCursor >= 0 && m.browseCursor < len(m.browseItems) && !m.browseItems[m.browseCursor].IsFolder {
 			bucket := m.items[m.cursor]
-
-			snap := &atomic.Pointer[progress.Snapshot]{}
-			snap.Store(&progress.Snapshot{Done: 0, Total: -1})
-			ctx, cancel := context.WithCancel(context.Background())
-
-			m.transferSnap = snap
-			m.transferLabel = fmt.Sprintf("Downloading %s", item.Name)
-			m.transferTotal = -1
-			m.transferLastDone = 0
-			m.transferLastTime = time.Now()
-			m.transferRate = 0
-			m.transferCancel = cancel
-			m.deleteProgress = ""
-
-			return m, tea.Batch(transferTick(), func() tea.Msg {
-				cwd, err := os.Getwd()
-				if err != nil {
-					return errMsg{err: fmt.Errorf("could not get working directory: %w", err)}
-				}
-				// Seed the progress total; a lookup failure is non-fatal
-				// (the bar falls back to indeterminate) since the
-				// downloader performs its own size check anyway.
-				size, sizeErr := m.client.GetObjectSize(ctx, bucket.name, item.Key, bucket.region)
-				if sizeErr != nil {
-					size = -1
-				}
-				snap.Store(&progress.Snapshot{Done: 0, Total: size})
-
-				outPath := filepath.Join(cwd, item.Name)
-				f, err := os.Create(outPath)
-				if err != nil {
-					return errMsg{err: fmt.Errorf("could not create file %s: %w", outPath, err)}
-				}
-				defer f.Close()
-				// Concurrent ranged download: parallelizes large files
-				// instead of a single streaming GetObject.
-				writer := progress.NewWriterAt(f, func(done int64) {
-					snap.Store(&progress.Snapshot{Done: done, Total: size})
-				})
-				if _, err := m.client.DownloadFile(ctx, bucket.name, item.Key, bucket.region, writer, 0, 0); err != nil {
-					return errMsg{err: fmt.Errorf("could not download %s: %w", item.Name, err)}
-				}
-				return downloadDoneMsg{filename: item.Name, path: outPath}
-			})
+			share := newShare(m.client, bucket.name, m.browseItems[m.browseCursor].Key, bucket.region)
+			m.share = &share
+			return m, m.share.Init()
 		}
 	case "n":
 		// Create a new folder at the current browse prefix
@@ -2150,7 +1838,6 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 		m.urlUpload = &um
 		return m, m.urlUpload.Init()
 	case "r":
-		m.browseSelected = nil
 		m.loading = true
 		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 	}
@@ -2204,10 +1891,12 @@ func (m bucketsModel) updateDeleteSelection(msg tea.KeyMsg) (bucketsModel, tea.C
 			return m, nil
 		}
 		bucket := m.items[m.cursor]
-		selected := make([]awsClient.BrowseItem, 0, len(m.browseSelected))
-		for _, item := range m.browseItems {
-			if m.browseSelected[item.Key] {
-				selected = append(selected, item)
+		selected := append([]awsClient.BrowseItem{}, m.pendingDelete...)
+		if m.pendingDelete == nil {
+			for _, item := range m.browseItems {
+				if m.browseSelected[item.Key] {
+					selected = append(selected, item)
+				}
 			}
 		}
 		if len(selected) == 0 {
@@ -2239,7 +1928,7 @@ func (m bucketsModel) updateDeleteSelection(msg tea.KeyMsg) (bucketsModel, tea.C
 				}
 			})
 			if err != nil {
-				return errMsg{err: err}
+				return bucketErrorMsg{err: err}
 			}
 			deleted = fileDeleted
 			deletedFolders := make([]string, 0, len(folderKeys))
@@ -2254,16 +1943,16 @@ func (m bucketsModel) updateDeleteSelection(msg tea.KeyMsg) (bucketsModel, tea.C
 					if len(deletedFolders) > 0 {
 						cleanupCtx := context.WithoutCancel(ctx)
 						if cleanupErr := m.client.SetPrefixesPrivate(cleanupCtx, bucket.name, deletedFolders, bucket.region); cleanupErr != nil {
-							return errMsg{err: fmt.Errorf("%v; public-access cleanup also failed: %w", err, cleanupErr)}
+							return bucketErrorMsg{err: fmt.Errorf("%v; public-access cleanup also failed: %w", err, cleanupErr)}
 						}
 					}
-					return errMsg{err: err}
+					return bucketErrorMsg{err: err}
 				}
 				deletedFolders = append(deletedFolders, folderKey)
 			}
 			if len(deletedFolders) > 0 {
 				if err := m.client.SetPrefixesPrivate(ctx, bucket.name, deletedFolders, bucket.region); err != nil {
-					return errMsg{err: err}
+					return bucketErrorMsg{err: err}
 				}
 			}
 			return operationDoneMsg{message: fmt.Sprintf(
@@ -2281,51 +1970,6 @@ func (m bucketsModel) updateDeleteSelection(msg tea.KeyMsg) (bucketsModel, tea.C
 	}
 }
 
-func (m bucketsModel) toggleBrowseFolder() (bucketsModel, tea.Cmd) {
-	if m.browseCursor >= len(m.browseItems) {
-		return m, nil
-	}
-	item := m.browseItems[m.browseCursor]
-	if !item.IsFolder {
-		return m, nil
-	}
-	bucket := m.items[m.cursor]
-
-	// Use the folder's key as the prefix to toggle
-	prefix := item.Key
-
-	// Check current access status
-	accesses, _ := m.client.GetPrefixAccessStatus(context.Background(), bucket.name, bucket.region, []string{prefix})
-	isPublic := len(accesses) > 0 && accesses[0].IsPublic
-
-	if isPublic {
-		m.loading = true
-		return m, func() tea.Msg {
-			ctx := context.Background()
-			err := m.client.SetPrefixPrivate(ctx, bucket.name, prefix, bucket.region)
-			if err != nil {
-				return errMsg{err: err}
-			}
-			return operationDoneMsg{message: fmt.Sprintf("Set %s to PRIVATE", prefix)}
-		}
-	}
-
-	// Making public requires confirmation
-	m.confirmAction = fmt.Sprintf("Making %s%s public requires changing the bucket's public access settings.", bucket.name+"/", prefix)
-	m.confirmFunc = func() tea.Msg {
-		ctx := context.Background()
-		err := m.client.SetPrefixPublic(ctx, bucket.name, prefix, bucket.region)
-		if err != nil {
-			return errMsg{err: err}
-		}
-		return operationDoneMsg{message: fmt.Sprintf("Set %s to PUBLIC", prefix)}
-	}
-	m.mode = bucketDetailConfirm
-	m.confirmInput2.SetValue("")
-	m.confirmInput2.Focus()
-	return m, textinput.Blink
-}
-
 func (m bucketsModel) updateDeleteFolder(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
@@ -2341,20 +1985,23 @@ func (m bucketsModel) updateDeleteFolder(msg tea.KeyMsg) (bucketsModel, tea.Cmd)
 		m.deleteProgress = "Deleting folder... 0 objects removed"
 		m.mode = bucketDetail
 		folderKey := m.folderDeleteKey
+		ctx, cancel := context.WithCancel(context.Background())
+		m.bulkDeleting = true
+		m.bulkDeleteCancel = cancel
 		return m, func() tea.Msg {
-			ctx := context.Background()
+			defer cancel()
 			err := m.client.DeletePrefix(ctx, bucket.name, folderKey, bucket.region, func(deleted int64) {
 				if prog != nil {
 					prog.Send(folderDeleteProgressMsg{deleted: deleted})
 				}
 			})
 			if err != nil {
-				return errMsg{err: err}
+				return bucketErrorMsg{err: err}
 			}
 			if m.folderDeletePublic {
 				err = m.client.SetPrefixPrivate(ctx, bucket.name, folderKey, bucket.region)
 				if err != nil {
-					return errMsg{err: err}
+					return bucketErrorMsg{err: err}
 				}
 			}
 			return operationDoneMsg{message: fmt.Sprintf("Deleted folder %s and all its contents", folderKey)}

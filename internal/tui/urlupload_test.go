@@ -1,20 +1,11 @@
 package tui
 
-// TODO: add an integration-style model test once bubbletea testing utilities
-// mature enough to drive sub-models without a running tea.Program.
-//
-// The interaction we'd want to test:
-//   1. Construct urlUploadModel via newURLUpload.
-//   2. Set urlInput.SetValue("https://example.com/file.zip").
-//   3. Send tea.KeyMsg{Type: tea.KeyEnter}.
-//   4. Assert m.phase == urlUploadPhaseProgress.
-//
-// Testing that path requires mocking *aws.Client or injecting an
-// httpcopy.Uploader — a small refactor for a follow-up.
-
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/dcorbell/s3m/internal/httpcopy"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -124,5 +115,65 @@ func TestAppCtrlCCancelsURLUploadInsteadOfQuitting(t *testing.T) {
 	}
 	if updated.buckets.urlUpload == nil {
 		t.Fatal("expected URL upload modal to remain active until cancellation result arrives")
+	}
+}
+
+func TestURLUploadRequiresResolvedReviewBeforeMutation(t *testing.T) {
+	m := newURLUpload(nil, "bucket", "region", "folder/")
+	m.urlInput.SetValue("https://example.com/file")
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.phase != urlUploadPhaseResolve {
+		t.Fatal("upload started before destination review")
+	}
+	tag := "existing"
+	m, _ = m.Update(urlUploadResolvedMsg{ID: m.id, resolved: httpcopy.Resolved{URL: "https://example.com/file", Key: "folder/report.txt", BytesTotal: 4}, condition: &tag})
+	if m.phase != urlUploadPhaseReview {
+		t.Fatal("missing destination review")
+	}
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || m.phase != urlUploadPhaseReview {
+		t.Fatal("Enter silently replaced existing object")
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	if m.phase != urlUploadPhaseProgress {
+		t.Fatal("explicit overwrite did not start upload")
+	}
+}
+func TestURLUploadResolveFailureKeepsInputs(t *testing.T) {
+	m := newURLUpload(nil, "bucket", "region", "")
+	m.urlInput.SetValue("https://example.com/file")
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = m.Update(urlUploadResolveFailedMsg{ID: m.id, err: errors.New("access denied")})
+	if m.phase != urlUploadPhaseInput || m.urlInput.Value() == "" || m.inputError == "" {
+		t.Fatal("failed check lost source or error")
+	}
+}
+func TestURLUploadEscapeCancelsProgress(t *testing.T) {
+	m := newURLUpload(nil, "bucket", "region", "")
+	m.phase = urlUploadPhaseProgress
+	cancelled := false
+	m.cancel = func() { cancelled = true }
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if !cancelled || !m.cancelling {
+		t.Fatal("Escape did not cancel while preserving progress")
+	}
+}
+
+func TestURLUploadFailureKeepsRetryInputs(t *testing.T) {
+	m := newURLUpload(nil, "bucket", "region", "")
+	m.urlInput.SetValue("https://example.com/file")
+	m.keyInput.SetValue("destination")
+	m.phase = urlUploadPhaseProgress
+	m = m.failed(errors.New("destination changed"))
+	if m.phase != urlUploadPhaseInput || m.urlInput.Value() == "" || m.keyInput.Value() != "destination" || m.inputError != "destination changed" {
+		t.Fatal("upload failure lost editable retry state")
+	}
+}
+func TestURLUploadIgnoresStaleResolve(t *testing.T) {
+	m := newURLUpload(nil, "bucket", "region", "")
+	m.phase = urlUploadPhaseResolve
+	m, _ = m.Update(urlUploadResolvedMsg{ID: m.id + 1, resolved: httpcopy.Resolved{Key: "other"}})
+	if m.phase != urlUploadPhaseResolve || m.resolved.Key != "" {
+		t.Fatal("stale resolve changed upload")
 	}
 }

@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -24,14 +27,16 @@ const (
 
 // App is the root Bubble Tea model.
 type App struct {
-	client   *awsClient.Client
-	screen   screen
-	width    int
-	height   int
-	err      error
-	buckets  bucketsModel
-	users    usersModel
-	showHelp bool
+	client     *awsClient.Client
+	screen     screen
+	width      int
+	height     int
+	err        error
+	buckets    bucketsModel
+	users      usersModel
+	showHelp   bool
+	quitPrompt bool
+	helpOffset int
 }
 
 // NewApp creates the root app model.
@@ -49,6 +54,7 @@ func (a App) Init() tea.Cmd {
 		return tea.Batch(
 			a.buckets.spinner.Tick,
 			a.buckets.loadDirectBucketMetadata(),
+			a.buckets.loadBrowse(),
 			a.buckets.loadPrefixes(),
 			a.buckets.loadBucketUsers(),
 		)
@@ -57,168 +63,200 @@ func (a App) Init() tea.Cmd {
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var hadErr bool
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		a.width = msg.Width
-		a.height = msg.Height
-		a.buckets.width = msg.Width
-		a.buckets.height = msg.Height
-		a.users.width = msg.Width
-		a.users.height = msg.Height
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		a.width = size.Width
+		a.height = size.Height
+		a.buckets.width = size.Width
+		a.buckets.height = max(1, size.Height-3)
+		a.users.width = size.Width
+		a.users.height = max(1, size.Height-3)
+		a.buckets.filePicker.width = size.Width
+		a.buckets.filePicker.height = max(1, size.Height-7)
 		return a, nil
-
-	case tea.KeyMsg:
-		// Global keys
-		switch msg.String() {
-		case "ctrl+c":
-			if a.buckets.urlUpload == nil {
-				if a.buckets.bulkDeleteCancel != nil {
-					a.buckets.bulkDeleteCancel()
-				}
-				return a, tea.Quit
+	}
+	if k, ok := msg.(tea.KeyMsg); ok {
+		if a.quitPrompt {
+			a.quitPrompt = false
+			if k.String() == "y" {
+				a.buckets.quitAfterCancel = true
+				cmd := a.cancelOperation()
+				return a, cmd
 			}
-		case "q":
-			// Quit from any screen, unless user is typing in a text input
-			if !a.isTextInputActive() {
-				if a.buckets.bulkDeleteCancel != nil {
-					a.buckets.bulkDeleteCancel()
-				}
-				return a, tea.Quit
+			return a, nil
+		}
+		if a.showHelp {
+			switch k.String() {
+			case "down", "j":
+				a.helpOffset++
+			case "up", "k":
+				a.helpOffset = max(0, a.helpOffset-1)
+			case "pgdown":
+				a.helpOffset += max(1, a.height-7)
+			case "pgup":
+				a.helpOffset = max(0, a.helpOffset-max(1, a.height-7))
+			default:
+				a.showHelp = false
 			}
-		case "?":
-			if !a.isTextInputActive() {
-				a.showHelp = !a.showHelp
+			return a, nil
+		}
+		if k.String() == "ctrl+c" && a.operationActive() {
+			cmd := a.cancelOperation()
+			return a, cmd
+		}
+		if k.String() == "q" && a.operationActive() {
+			a.quitPrompt = true
+			return a, nil
+		}
+		if !a.isTextInputActive() {
+			switch k.String() {
+			case "q", "ctrl+c":
+				return a, tea.Quit
+			case "?", "m":
+				a.showHelp = true
+				a.helpOffset = 0
+				return a, nil
+			case "u":
+				a.screen = screenUsers
+				if len(a.users.items) == 0 {
+					cmd := a.users.init()
+					return a, cmd
+				}
+				return a, nil
+			case "b":
+				a.screen = screenBuckets
 				return a, nil
 			}
 		}
-
-		if a.showHelp {
-			a.showHelp = false
-			return a, nil
-		}
-
-	case errMsg:
-		cancelledBackgroundOperation := errors.Is(msg.err, context.Canceled) &&
-			(a.buckets.transferSnap != nil || a.buckets.bulkDeleting)
-		if a.screen != screenBuckets || !cancelledBackgroundOperation {
-			a.err = msg.err
-		}
-		hadErr = true
 	}
-
-	// Route to active screen
 	var cmd tea.Cmd
-	switch a.screen {
-	case screenBuckets, screenBucketDetail, screenCreateBucket:
-		a, cmd = a.updateBuckets(msg)
-	case screenUsers, screenUserDetail, screenCreateUser, screenCredentials:
-		a, cmd = a.updateUsers(msg)
+	switch msg := msg.(type) {
+	case bucketDeleteCompleteMsg, bucketsLoadedMsg, bucketStatsMsg, bucketNotEmptyMsg, deleteProgressMsg, prefixesLoadedMsg, browseLoadedMsg, browseFolderCreatedMsg, folderCountedMsg, folderDeleteProgressMsg, selectionDeleteProgressMsg, downloadDoneMsg, uploadDoneMsg, bucketUsersLoadedMsg, userPickerLoadedMsg, bucketAccessUpdatedMsg, directBucketMetadataLoadedMsg, bucketErrorMsg, operationDoneMsg, urlUploadDoneMsg, urlUploadErrMsg, urlUploadResolvedMsg, urlUploadResolveFailedMsg, urlUploadProgressTickMsg, sharePreparedMsg, shareGeneratedMsg, shareClosedMsg, transferTickMsg, transferCheckedMsg:
+		a.buckets, cmd = a.buckets.update(msg)
+		if result, ok := msg.(bucketAccessUpdatedMsg); ok && result.bucket == a.buckets.currentBucketName() && a.users.detailUser != "" {
+			var refresh tea.Cmd
+			a.users, refresh = a.users.loadAccess()
+			cmd = tea.Batch(cmd, refresh)
+		}
+	case usersResultMsg, usersLoadedMsg, credentialsMsg, userAccessLoadedMsg, createBucketPickerLoadedMsg, detailBucketPickerLoadedMsg, accessUpdatedMsg:
+		a.users, cmd = a.users.update(msg)
+		if result, ok := msg.(usersResultMsg); ok && result.kind == "permission" && result.err == nil && a.buckets.mode == bucketDetail && len(a.buckets.items) > 0 {
+			a.buckets.bucketUsersLoading = true
+			cmd = tea.Batch(cmd, a.buckets.loadBucketUsers())
+		}
+	case errMsg:
+		err := msg.err
+		if !errors.Is(err, context.Canceled) {
+			a.err = err
+		}
+		if a.screen == screenUsers {
+			a.users, cmd = a.users.update(msg)
+		} else {
+			a.buckets, cmd = a.buckets.update(msg)
+		}
+	default:
+		if a.screen == screenUsers || a.screen == screenUserDetail || a.screen == screenCreateUser || a.screen == screenCredentials {
+			if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" && a.users.mode == usersList && !a.users.ownsInput() && a.users.filter.query == "" {
+				a.screen = screenBuckets
+				return a, nil
+			}
+			a.users, cmd = a.users.update(msg)
+		} else {
+			a.buckets, cmd = a.buckets.update(msg)
+		}
 	}
-
-	if hadErr {
-		return a, cmd
+	if a.buckets.quitAfterCancel && !a.operationActive() {
+		if a.users.mode == usersShowCreds && a.users.creds.secretKey != "" {
+			a.buckets.quitAfterCancel = false
+			a.users.creds.message = "Save the new credentials before quitting."
+			return a, cmd
+		}
+		return a, tea.Quit
 	}
 	return a, cmd
+}
+
+func (a App) operationActive() bool {
+	return a.users.mutating || a.buckets.mutationPending || a.buckets.transferSnap != nil || a.buckets.bulkDeleting || a.buckets.urlUpload != nil && a.buckets.urlUpload.Active()
+}
+
+func (a *App) cancelOperation() tea.Cmd {
+	if a.users.mutating {
+		updated, cmd := a.users.update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		a.users = updated
+		return cmd
+	}
+	a.buckets.cancelling = true
+	if a.buckets.mutationCancel != nil {
+		a.buckets.mutationCancel()
+	}
+	if a.buckets.transferCancel != nil {
+		a.buckets.transferCancel()
+	}
+	if a.buckets.bulkDeleteCancel != nil {
+		a.buckets.bulkDeleteCancel()
+	}
+	if a.buckets.urlUpload != nil {
+		updated, cmd := a.buckets.urlUpload.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		a.buckets.urlUpload = &updated
+		return cmd
+	}
+	return nil
 }
 
 func (a App) View() string {
+	if a.width > 0 && (a.width < 60 || a.height < 12) {
+		return fitTerminal("Resize to at least 60 columns and 12 lines. Your place is preserved.", a.width, a.height)
+	}
+	if a.quitPrompt {
+		return renderPanel("Cancel task and quit?", "Completed changes will remain. Stay to continue monitoring.", "y: Cancel and quit after completion  Any other key: Stay", a.width, a.height)
+	}
 	if a.showHelp {
 		return a.viewHelp()
 	}
-
 	var content string
-	switch a.screen {
-	case screenBuckets, screenBucketDetail, screenCreateBucket:
-		content = a.buckets.view()
-	case screenUsers, screenUserDetail, screenCreateUser, screenCredentials:
+	if a.screen == screenUsers || a.screen == screenUserDetail || a.screen == screenCreateUser || a.screen == screenCredentials {
 		content = a.users.view()
+	} else {
+		content = a.buckets.view()
 	}
-
+	account, profile, region := "Unknown", "default", "Unknown"
+	if a.client != nil {
+		if a.client.Account != "" {
+			account = a.client.Account
+		}
+		if a.client.Profile != "" {
+			profile = a.client.Profile
+		}
+		if a.client.Region != "" {
+			region = a.client.Region
+		}
+	}
+	header := fmt.Sprintf("s3m  Account: %s  Profile: %s  Region: %s", account, profile, region)
 	if a.err != nil {
-		content += "\n" + errorStyle.Render("Error: "+a.err.Error())
+		header += "\n" + errorStyle.Render("Error: "+a.err.Error())
 	}
-
-	return content
+	return fitTerminal(header+"\n"+content, a.width, a.height)
 }
 
 func (a App) viewHelp() string {
-	s := titleStyle.Render("s3m - Keyboard Shortcuts") + "\n\n"
-	s += "  b       Open buckets\n"
-	s += "  u       Open users\n"
-	s += "  c       Create new item / copy URL\n"
-	s += "  d       Delete selected item\n"
-	s += "  space   Select / deselect item while browsing\n"
-	s += "  a       Select all / clear selection while browsing\n"
-	s += "  g       Download selected file\n"
-	s += "  p       Upload file to current folder\n"
-	s += "  U       Upload to S3 from a URL or WeTransfer link\n"
-	s += "  enter   Select / drill in\n"
-	s += "  pgup    Page up in lists\n"
-	s += "  pgdn    Page down in lists\n"
-	s += "  esc     Go back\n"
-	s += "  ?       Toggle this help\n"
-	s += "  q       Quit\n"
-	s += "\n" + helpStyle.Render("Press any key to close")
-	return s
+	text := "b: Buckets   u: Managed users   q: Quit\n/: Filter names as you type\nEnter in filter: Keep results   Esc: Clear filter\nUp/Down: Move   PgUp/PgDn: Page   r: Refresh\nEnter/Right: Open   Left/Esc: Back\n"
+	if a.screen == screenUsers {
+		text += "c: Create user   d: Review deletion\ne: Review permission   a: Assign bucket\nK: Manage access keys\nKeys: c Create, x Deactivate, a Activate, d Delete inactive\nCredentials: v Reveal, c Copy, s Save, Enter Done\n"
+	} else if a.buckets.mode == bucketsList {
+		text += "c: Create bucket   d: Review bucket deletion\n"
+	} else {
+		text += "Tab: Files / Access / Details\nSpace: Select   a: Select displayed results or clear\nn: New folder   d: Review deletion   i: Full path\np: Upload local file   U: Upload from URL\ng: Download to a chosen path\ns: Create a temporary download link\nAccess: Enter Review edit, a Add user, d Remove\nEsc / Ctrl+C during a task: Cancel and wait\n"
+	}
+	lines := strings.Split(text, "\n")
+	a.helpOffset = min(a.helpOffset, max(0, len(lines)-max(1, a.height-5)))
+	return renderPanel("Help", strings.Join(lines[a.helpOffset:], "\n"), "Up/Down: Scroll   Esc: Close", a.width, a.height)
 }
 
-// isTextInputActive returns true when the user is typing in a text field.
 func (a App) isTextInputActive() bool {
-	return a.buckets.mode == bucketsCreate ||
-		a.buckets.mode == bucketsTypeDelete ||
-		a.buckets.mode == bucketsConfirmDeleteNonEmpty ||
-		a.buckets.mode == bucketDetailAddPrefix ||
-		a.buckets.mode == bucketDetailAddFolder ||
-		a.buckets.mode == bucketDetailConfirm ||
-		a.buckets.mode == bucketDetailDeleteFolder ||
-		a.buckets.mode == bucketDetailDeleteSelection ||
-		a.buckets.mode == bucketDetailPickUser ||
-		a.buckets.mode == bucketDetailPickPerm ||
-		a.buckets.mode == bucketDetailConfirmRemoveUser ||
-		a.buckets.urlUpload != nil ||
-		a.users.mode == usersCreate
-}
-
-// Routing helpers
-
-func (a App) updateBuckets(msg tea.Msg) (App, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if !a.isTextInputActive() {
-			switch msg.String() {
-			case "u":
-				// Shortcut to users screen from bucket list
-				a.screen = screenUsers
-				if len(a.users.items) > 0 {
-					return a, nil
-				}
-				return a, a.users.init()
-			case "esc":
-				if a.buckets.mode == bucketsList {
-					// Bucket list is home — esc quits
-					return a, tea.Quit
-				}
-			}
-		}
+	if a.screen == screenUsers || a.screen == screenUserDetail || a.screen == screenCreateUser || a.screen == screenCredentials {
+		return a.users.ownsInput()
 	}
-	var cmd tea.Cmd
-	a.buckets, cmd = a.buckets.update(msg)
-	return a, cmd
-}
-
-func (a App) updateUsers(msg tea.Msg) (App, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if msg.String() == "esc" && a.users.mode == usersList {
-			// Go back to bucket list
-			a.screen = screenBuckets
-			return a, nil
-		}
-	}
-	var cmd tea.Cmd
-	a.users, cmd = a.users.update(msg)
-	return a, cmd
+	return a.buckets.ownsInput()
 }
 
 // Message types
@@ -227,12 +265,15 @@ type errMsg struct{ err error }
 
 type bucketsLoadedMsg struct {
 	buckets []bucketItem
+	request uint64
 }
 
 type bucketStatsMsg struct {
 	name      string
 	objects   int64
 	sizeBytes int64
+	known     bool
+	updated   time.Time
 }
 
 type bucketNotEmptyMsg struct {
@@ -249,8 +290,11 @@ type usersLoadedMsg struct {
 }
 
 type prefixesLoadedMsg struct {
-	bucket   string
-	prefixes []prefixItem
+	bucket     string
+	prefixes   []prefixItem
+	request    uint64
+	rootPublic bool
+	known      bool
 }
 
 type credentialsMsg struct {
@@ -264,7 +308,10 @@ type operationDoneMsg struct {
 }
 
 type browseLoadedMsg struct {
-	items []awsClient.BrowseItem
+	items   []awsClient.BrowseItem
+	bucket  string
+	prefix  string
+	request uint64
 }
 
 type browseFolderCreatedMsg struct {
@@ -317,9 +364,10 @@ type accessUpdatedMsg struct {
 }
 
 type bucketUsersLoadedMsg struct {
-	bucket string
-	users  []model.UserPermission
-	err    error
+	bucket  string
+	users   []model.UserPermission
+	err     error
+	request uint64
 }
 
 type userPickerLoadedMsg struct {
@@ -334,7 +382,8 @@ type bucketAccessUpdatedMsg struct {
 }
 
 type directBucketMetadataLoadedMsg struct {
-	bucket bucketItem
+	bucket  bucketItem
+	request uint64
 }
 
 // prog holds the running tea.Program so goroutines can send progress messages.

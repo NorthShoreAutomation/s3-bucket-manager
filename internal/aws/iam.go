@@ -26,7 +26,7 @@ const (
 
 // ErrIAMAccessDenied signals that the current credentials cannot perform
 // IAM user listing. Callers should render a friendly notice rather than
-// a raw AWS error — this is expected for bucket-scoped credentials.
+// a raw AWS error. This is expected for bucket-scoped credentials.
 var ErrIAMAccessDenied = errors.New("IAM access denied: current credentials cannot list users")
 
 // isAccessDenied reports whether err is an AWS AccessDenied API error.
@@ -42,73 +42,108 @@ func isAccessDenied(err error) bool {
 // ListManagedUsers returns IAM users tagged with s3m:managed=true.
 // Tag checks and key counts are fetched concurrently for speed.
 func (c *Client) ListManagedUsers(ctx context.Context) ([]model.User, error) {
-	output, err := c.IAM.ListUsers(ctx, &iam.ListUsersInput{})
-	if err != nil {
-		if isAccessDenied(err) {
-			return nil, ErrIAMAccessDenied
+	var allUsers []iamtypes.User
+	var marker *string
+	for {
+		output, err := c.IAM.ListUsers(ctx, &iam.ListUsersInput{Marker: marker})
+		if err != nil {
+			if isAccessDenied(err) {
+				return nil, ErrIAMAccessDenied
+			}
+			return nil, fmt.Errorf("could not list users: %w", err)
 		}
-		return nil, fmt.Errorf("could not list users: %w", err)
+		if output == nil {
+			return nil, errors.New("user list response was empty")
+		}
+		allUsers = append(allUsers, output.Users...)
+		if !output.IsTruncated {
+			break
+		}
+		if output.Marker == nil || awssdk.ToString(output.Marker) == awssdk.ToString(marker) {
+			return nil, errors.New("user list pagination did not advance")
+		}
+		marker = output.Marker
 	}
 
 	type result struct {
 		user    model.User
 		managed bool
+		err     error
 	}
 
-	results := make([]result, len(output.Users))
+	results := make([]result, len(allUsers))
 	var wg sync.WaitGroup
-	for i, u := range output.Users {
+	for i, u := range allUsers {
 		wg.Add(1)
 		go func(idx int, u iamtypes.User) {
 			defer wg.Done()
 			username := awssdk.ToString(u.UserName)
-			if !c.isManaged(ctx, username) {
+			managed, tagErr := c.managedStatus(ctx, username)
+			if tagErr != nil {
+				results[idx].err = fmt.Errorf("tags for %s: %w", username, tagErr)
 				return
 			}
-			keyCount := 0
-			keysOutput, _ := c.IAM.ListAccessKeys(ctx, &iam.ListAccessKeysInput{
-				UserName: u.UserName,
-			})
-			if keysOutput != nil {
-				keyCount = len(keysOutput.AccessKeyMetadata)
+			if !managed {
+				return
 			}
+			keys, keysErr := c.ListAccessKeys(ctx, username)
 			results[idx] = result{
 				user: model.User{
-					Name:       username,
-					ARN:        awssdk.ToString(u.Arn),
-					CreateDate: awssdk.ToTime(u.CreateDate),
-					KeyCount:   keyCount,
+					Name:          username,
+					ARN:           awssdk.ToString(u.Arn),
+					CreateDate:    awssdk.ToTime(u.CreateDate),
+					KeyCount:      len(keys),
+					KeyCountKnown: keysErr == nil,
 				},
 				managed: true,
+				err:     keysErr,
 			}
 		}(i, u)
 	}
 	wg.Wait()
 
 	var users []model.User
+	var errs []error
 	for _, r := range results {
+		if r.err != nil {
+			errs = append(errs, r.err)
+		}
 		if r.managed {
 			users = append(users, r.user)
 		}
 	}
-	return users, nil
+	return users, errors.Join(errs...)
 }
 
-// isManaged checks if a user has the s3m:managed=true tag.
-func (c *Client) isManaged(ctx context.Context, username string) bool {
+func (c *Client) managedStatus(ctx context.Context, username string) (bool, error) {
 	tagsOutput, err := c.IAM.ListUserTags(ctx, &iam.ListUserTagsInput{
 		UserName: awssdk.String(username),
 	})
 	if err != nil {
-		return false
+		return false, err
+	}
+	if tagsOutput == nil {
+		return false, errors.New("tag response was empty")
 	}
 	for _, tag := range tagsOutput.Tags {
 		if awssdk.ToString(tag.Key) == managedTagKey && awssdk.ToString(tag.Value) == managedTagValue {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
+
+// PartialUserCreationError identifies a user created before a later step failed.
+// The caller must offer recovery instead of retrying CreateUser blindly.
+type PartialUserCreationError struct {
+	Username, Step string
+	Err            error
+}
+
+func (e *PartialUserCreationError) Error() string {
+	return fmt.Sprintf("User %q was already created; %s failed: %v. Review this user in IAM before retrying. No automatic deletion was performed.", e.Username, e.Step, e.Err)
+}
+func (e *PartialUserCreationError) Unwrap() error { return e.Err }
 
 // CreateManagedUser creates an IAM user, tags it, creates an access key, and attaches
 // a policy granting access to the specified buckets.
@@ -129,14 +164,14 @@ func (c *Client) CreateManagedUser(ctx context.Context, username string, accesse
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("could not tag user %q: %w", username, err)
+		return nil, &PartialUserCreationError{Username: username, Step: "tagging", Err: err}
 	}
 
 	// Attach bucket access policy
 	policyDoc := buildBucketPolicyWithPermissions(accesses)
 	policyJSON, err := json.Marshal(policyDoc)
 	if err != nil {
-		return nil, fmt.Errorf("could not build policy: %w", err)
+		return nil, &PartialUserCreationError{Username: username, Step: "policy preparation", Err: err}
 	}
 	_, err = c.IAM.PutUserPolicy(ctx, &iam.PutUserPolicyInput{
 		UserName:       awssdk.String(username),
@@ -144,7 +179,7 @@ func (c *Client) CreateManagedUser(ctx context.Context, username string, accesse
 		PolicyDocument: awssdk.String(string(policyJSON)),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("could not attach policy to user %q: %w", username, err)
+		return nil, &PartialUserCreationError{Username: username, Step: "access policy", Err: err}
 	}
 
 	// Create access key
@@ -152,7 +187,10 @@ func (c *Client) CreateManagedUser(ctx context.Context, username string, accesse
 		UserName: awssdk.String(username),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("could not create access key for %q: %w", username, err)
+		return nil, &PartialUserCreationError{Username: username, Step: "access key creation", Err: err}
+	}
+	if keyOutput == nil || keyOutput.AccessKey == nil {
+		return nil, &PartialUserCreationError{Username: username, Step: "access key creation", Err: errors.New("key response was empty")}
 	}
 
 	_ = createOutput // used for the CreateUser call
@@ -238,7 +276,7 @@ func (c *Client) GetUserBucketAccess(ctx context.Context, username string) ([]mo
 		PolicyName: awssdk.String(policyName),
 	})
 	if err != nil {
-		// NoSuchEntity means no policy attached — return empty slice, not an error
+		// NoSuchEntity means no policy attached, so return an empty slice.
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchEntity" {
 			return nil, nil
@@ -348,9 +386,9 @@ func (c *Client) SetUserBucketAccess(ctx context.Context, username string, acces
 // ListBucketUsers returns all managed users that have access to the given bucket,
 // along with their permission level.
 func (c *Client) ListBucketUsers(ctx context.Context, bucketName string) ([]model.UserPermission, error) {
-	users, err := c.ListManagedUsers(ctx)
-	if err != nil {
-		return nil, err
+	users, listErr := c.ListManagedUsers(ctx)
+	if listErr != nil && len(users) == 0 {
+		return nil, listErr
 	}
 
 	type result struct {
@@ -399,9 +437,9 @@ func (c *Client) ListBucketUsers(ctx context.Context, bucketName string) ([]mode
 	}
 
 	if len(errs) > 0 {
-		return perms, fmt.Errorf("failed to fetch access for %d user(s)", len(errs))
+		return perms, errors.Join(listErr, fmt.Errorf("failed to fetch access for %d user(s)", len(errs)))
 	}
-	return perms, nil
+	return perms, listErr
 }
 
 // DeleteManagedUser removes a user's policies, access keys, and the user itself.
@@ -445,11 +483,21 @@ func (c *Client) DeleteManagedUser(ctx context.Context, username string) error {
 // RotateAccessKey creates a new access key for the user.
 // Returns the new key. The caller should offer to delete old keys.
 func (c *Client) RotateAccessKey(ctx context.Context, username string) (*model.AccessKey, error) {
+	keys, err := c.ListAccessKeys(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) >= 2 {
+		return nil, errors.New("two access keys already exist; deactivate and explicitly delete an unused key before creating another")
+	}
 	keyOutput, err := c.IAM.CreateAccessKey(ctx, &iam.CreateAccessKeyInput{
 		UserName: awssdk.String(username),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("could not create new access key for %q: %w", username, err)
+	}
+	if keyOutput == nil || keyOutput.AccessKey == nil {
+		return nil, errors.New("key creation response was empty")
 	}
 
 	return &model.AccessKey{
@@ -474,20 +522,50 @@ func (c *Client) DeleteAccessKey(ctx context.Context, username, accessKeyID stri
 
 // ListAccessKeys returns access key metadata for a user.
 func (c *Client) ListAccessKeys(ctx context.Context, username string) ([]model.AccessKey, error) {
-	output, err := c.IAM.ListAccessKeys(ctx, &iam.ListAccessKeysInput{
-		UserName: awssdk.String(username),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("could not list access keys for %q: %w", username, err)
-	}
-
-	keys := make([]model.AccessKey, 0, len(output.AccessKeyMetadata))
-	for _, k := range output.AccessKeyMetadata {
-		keys = append(keys, model.AccessKey{
-			AccessKeyID: awssdk.ToString(k.AccessKeyId),
-			UserName:    awssdk.ToString(k.UserName),
-			CreateDate:  awssdk.ToTime(k.CreateDate),
-		})
+	var keys []model.AccessKey
+	var marker *string
+	for {
+		output, err := c.IAM.ListAccessKeys(ctx, &iam.ListAccessKeysInput{UserName: awssdk.String(username), Marker: marker})
+		if err != nil {
+			return keys, fmt.Errorf("could not list access keys for %q: %w", username, err)
+		}
+		if output == nil {
+			return keys, errors.New("access key list response was empty")
+		}
+		for _, k := range output.AccessKeyMetadata {
+			keys = append(keys, model.AccessKey{
+				AccessKeyID: awssdk.ToString(k.AccessKeyId),
+				UserName:    awssdk.ToString(k.UserName),
+				CreateDate:  awssdk.ToTime(k.CreateDate),
+				Status:      string(k.Status),
+			})
+		}
+		if !output.IsTruncated {
+			break
+		}
+		if output.Marker == nil || awssdk.ToString(output.Marker) == awssdk.ToString(marker) {
+			return keys, errors.New("access key pagination did not advance")
+		}
+		marker = output.Marker
 	}
 	return keys, nil
+}
+
+// SetAccessKeyActive reversibly activates or deactivates an explicitly selected key.
+func (c *Client) SetAccessKeyActive(ctx context.Context, username, keyID string, active bool) error {
+	updater, ok := c.IAM.(interface {
+		UpdateAccessKey(context.Context, *iam.UpdateAccessKeyInput, ...func(*iam.Options)) (*iam.UpdateAccessKeyOutput, error)
+	})
+	if !ok {
+		return errors.New("access key status updates are unavailable")
+	}
+	status := iamtypes.StatusTypeInactive
+	if active {
+		status = iamtypes.StatusTypeActive
+	}
+	_, err := updater.UpdateAccessKey(ctx, &iam.UpdateAccessKeyInput{UserName: awssdk.String(username), AccessKeyId: awssdk.String(keyID), Status: status})
+	if err != nil {
+		return fmt.Errorf("could not update access key %q: %w", keyID, err)
+	}
+	return nil
 }
