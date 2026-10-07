@@ -321,6 +321,9 @@ type browseFolderCreatedMsg struct {
 }
 
 type folderCountedMsg struct {
+	bucket   bucketItem
+	prefix   string
+	request  uint64
 	name     string
 	key      string
 	count    int64

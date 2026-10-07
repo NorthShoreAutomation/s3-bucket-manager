@@ -133,6 +133,7 @@ type bucketsModel struct {
 	browseOffset       int                    // scroll offset in browse view
 	browseSelected     map[string]bool        // selected keys in the current browse listing
 	folderDeleteKey    string                 // key of folder being deleted
+	folderDeleteBucket bucketItem             // bucket captured when the folder count began
 	folderDeleteCnt    int64                  // object count for folder delete confirm
 	folderDeletePublic bool                   // whether the folder being deleted also has public access
 
@@ -399,12 +400,17 @@ func (m bucketsModel) updateContent(msg tea.Msg) (bucketsModel, tea.Cmd) {
 			return m, nil
 		}
 		if m.bulkDeleting {
+			completed := m.deleteProgress
 			m.bulkDeleting = false
 			m.bulkDeleteCancel = nil
 			m.browseSelected = nil
 			m.deleteProgress = ""
+			m.detailMessage = "Delete stopped. " + completed
+			m.err = fmt.Errorf("%s; %w", completed, msg.err)
 			if errors.Is(msg.err, context.Canceled) {
-				m.detailMessage = "Bulk delete cancelled"
+				m.detailMessage = "Delete cancelled. " + completed
+				m.err = nil
+				m.errKind = ""
 			}
 			m.loading = true
 			return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
@@ -562,7 +568,12 @@ func (m bucketsModel) updateContent(msg tea.Msg) (bucketsModel, tea.Cmd) {
 		return m, tea.Batch(m.spinner.Tick, m.loadBrowse())
 
 	case folderCountedMsg:
+		if m.mode != bucketDetail || msg.bucket.name != m.currentBucketName() || msg.prefix != m.browsePrefix || !currentRequest(m.browseRequests, msg.request) {
+			return m, nil
+		}
 		m.loading = false
+		m.clearError("folder-count")
+		m.folderDeleteBucket = msg.bucket
 		m.folderDeleteKey = msg.key
 		m.folderDeleteCnt = msg.count
 		m.folderDeletePublic = msg.isPublic
@@ -1779,18 +1790,20 @@ func (m bucketsModel) updateBrowse(msg tea.KeyMsg) (bucketsModel, tea.Cmd) {
 				// Folder delete - count objects first (with spinner)
 				m.loading = true
 				m.deleteProgress = "Counting objects..."
+				request := nextRequest(m.browseRequests)
+				prefix := m.browsePrefix
 				return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
 					ctx := context.Background()
 					count, err := m.client.CountObjects(ctx, bucket.name, item.Key, bucket.region)
 					if err != nil {
-						return bucketErrorMsg{err: err}
+						return bucketErrorMsg{err: err, kind: "folder-count", bucket: bucket.name, prefix: prefix, request: request}
 					}
 					accesses, err := m.client.GetPrefixAccessStatus(ctx, bucket.name, bucket.region, []string{item.Key})
 					if err != nil {
-						return bucketErrorMsg{err: err}
+						return bucketErrorMsg{err: err, kind: "folder-count", bucket: bucket.name, prefix: prefix, request: request}
 					}
 					isPublic := len(accesses) > 0 && accesses[0].IsPublic
-					return folderCountedMsg{name: item.Name, key: item.Key, count: count, isPublic: isPublic}
+					return folderCountedMsg{bucket: bucket, prefix: prefix, request: request, name: item.Name, key: item.Key, count: count, isPublic: isPublic}
 				})
 			}
 			// File delete
@@ -1983,7 +1996,12 @@ func (m bucketsModel) updateDeleteFolder(msg tea.KeyMsg) (bucketsModel, tea.Cmd)
 			m.mode = bucketDetail
 			return m, nil
 		}
-		bucket := m.items[m.cursor]
+		bucket := m.folderDeleteBucket
+		if bucket.name == "" || bucket.name != m.currentBucketName() {
+			m.mode = bucketDetail
+			m.detailMessage = "Delete cancelled: the original bucket is no longer selected."
+			return m, nil
+		}
 		m.loading = true
 		m.deleteProgress = "Deleting folder... 0 objects removed"
 		m.mode = bucketDetail

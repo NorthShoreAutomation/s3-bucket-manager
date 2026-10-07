@@ -35,6 +35,8 @@ func (m bucketsModel) matchesError(msg bucketErrorMsg) bool {
 		return false
 	}
 	switch msg.kind {
+	case "folder-count":
+		return m.mode == bucketDetail && msg.prefix == m.browsePrefix && currentRequest(m.browseRequests, msg.request)
 	case "browse":
 		return msg.prefix == m.browsePrefix && currentRequest(m.browseRequests, msg.request)
 	case "prefixes":

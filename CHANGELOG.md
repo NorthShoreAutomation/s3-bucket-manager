@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Delayed resource responses no longer replace newer listings or disappear after switching screens.
 - Public settings, partial IAM listings, unavailable key counts, and missing CloudWatch metrics retain explicit unknown states.
 - Cancellation waits for operation completion and preserves returned credentials and completed changes.
+- Stopped folder and selection deletes retain their completed-deletion counts through refresh. Delayed folder counts and errors cannot attach to another bucket or a newer browse request.
 - Release pipeline: `auto-release.yml` now explicitly dispatches `release.yml` via `gh workflow run` after pushing the version tag. Tag pushes made with `GITHUB_TOKEN` do not trigger workflows (GitHub anti-recursion rule), so `release.yml` never ran for v0.1.0–v0.6.0 despite the tags being created. `release.yml` gains a `workflow_dispatch` trigger with a `tag` input so the dispatched run (and manual backfills) can check out the right tag before running GoReleaser.
 - Empty bucket detail view no longer leaves the user stuck. `[n]` New folder, `[p]` Upload, and `[U]` URL upload now work directly from the bucket-detail / prefix-list view and target the bucket root, and are advertised in the footer help. Previously these keys were only wired up inside the browse view, so a freshly created bucket had no path to add content other than first adding a "prefix".
 

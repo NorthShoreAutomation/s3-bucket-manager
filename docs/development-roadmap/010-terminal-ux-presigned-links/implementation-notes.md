@@ -64,8 +64,14 @@ Dark and light sample previews were inspected together at 60, 80, and 120 column
 The regression test failed before this refinement and now passes. Full tests, focused race checks, build, and lint also pass.
 See [browser clarity previews](browser-clarity-captures.md).
 
-Implementation is ready for operator inspection.
-Independent branch review and a pull request follow acceptance in Normal mode. Nothing is merged or released.
+The operator accepted the implementation and requested a pull request.
+The first independent review found a lost completed-deletion count on cancellation or failure.
+It also noted a preexisting stale folder-count risk within this phase's safety scope.
+Two verification checks confirmed both behaviors without cloud calls. Regression tests failed before the fixes and now pass.
+Stopped deletion counts remain visible through refresh. Folder counts and errors carry their original bucket, location, and request.
+Confirmed deletion uses the captured bucket and rejects a changed target.
+The operator requested Gemini 3.8 Flash through `agy` for the updated branch review.
+See [the first review](review-round1.md). Nothing is merged or released.
 
 Parallel implementation tasks used GPT-6.1 Sol for user and transfer work and GPT-6 Sol for signing and sharing.
 The root agent owns integration and final verification. These implementation checks are not an independent branch review.
