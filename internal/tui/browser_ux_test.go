@@ -128,6 +128,45 @@ func TestBucketFilesAndDialogsFitSupportedTerminalSizes(t *testing.T) {
 	}
 }
 
+func TestFileBrowserSeparatesLocationListingAndFocus(t *testing.T) {
+	for _, size := range [][2]int{{60, 12}, {60, 15}, {80, 24}, {120, 40}} {
+		for _, status := range []string{"", "Upload complete."} {
+			a := screenFixture(size[0], size[1])
+			a.buckets.mode = bucketDetail
+			a.buckets.browseCursor = 49
+			a.buckets.detailMessage = status
+			view := a.View()
+			assertFixtureBounds(t, view, size[0], size[1])
+			lines := strings.Split(ansi.Strip(view), "\n")
+			location, header, focused, detail := -1, -1, -1, -1
+			for i, line := range lines {
+				switch {
+				case strings.Contains(line, "s3://example-bucket/"):
+					location = i
+				case strings.Contains(line, "NAME") && strings.Contains(line, "SIZE"):
+					header = i
+				case strings.HasPrefix(line, "> [ ] sample-49"):
+					focused = i
+				case strings.HasPrefix(line, "Focus: sample-49"):
+					detail = i
+				}
+			}
+			if location < 0 || header <= location || focused <= header || detail <= focused {
+				t.Fatalf("missing location, listing, or focused-file context at %v:\n%s", size, ansi.Strip(view))
+			}
+			if !strings.Contains(strings.Join(lines[location+1:header], "\n"), strings.Repeat("─", size[0])) ||
+				!strings.Contains(strings.Join(lines[focused+1:detail], "\n"), strings.Repeat("─", size[0])) {
+				t.Fatalf("file list needs visible boundaries at %v:\n%s", size, ansi.Strip(view))
+			}
+			for _, label := range []string{"Checked: 0", "Enter: Open", "m: Actions"} {
+				if !strings.Contains(ansi.Strip(view), label) {
+					t.Fatalf("missing %q at %v:\n%s", label, size, ansi.Strip(view))
+				}
+			}
+		}
+	}
+}
+
 func TestEmptyPageDownAndCreateFailureKeepUsefulState(t *testing.T) {
 	m := newBucketsModel(nil)
 	m.loading = false

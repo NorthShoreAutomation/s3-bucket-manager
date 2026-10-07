@@ -8,4 +8,5 @@
 - [Implementation plan](implementation-plan.md)
 - [Initial UX review](ux-review.md)
 - [Terminal captures](terminal-captures.md)
+- [File browser clarity previews](browser-clarity-captures.md)
 - [Implementation and validation](implementation-notes.md)

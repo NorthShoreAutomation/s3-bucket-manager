@@ -183,14 +183,17 @@ func (m bucketsModel) viewDetail() string {
 	if m.filterScope == "files" {
 		total = len(m.fullBrowse)
 	}
-	body := truncate("s3://"+b.name+"/"+m.browsePrefix, width) + "\n" + m.filterView(len(m.browseItems), total) + fmt.Sprintf("  Selected: %d\n", len(m.browseSelected))
+	body := breadcrumbStyle.PaddingLeft(0).Render(truncate("Location: s3://"+b.name+"/"+m.browsePrefix, width)) + "\n"
+	body += truncate(m.filterView(len(m.browseItems), total)+fmt.Sprintf("  Checked: %d", len(m.browseSelected)), width) + "\n"
 	if status := m.statusText(); status != "" {
 		body += truncate(status, width) + "\n"
 	}
 	rows := m.browseVisibleRows()
 	cursor, offset := viewportBounds(m.browseCursor, m.browseOffset, len(m.browseItems), rows)
-	nameWidth := max(12, width-16)
-	body += pad("  NAME", nameWidth) + " SIZE\n"
+	const sizeWidth = 12
+	nameWidth := max(12, width-sizeWidth-2)
+	body += separator(width) + "\n"
+	body += tableHeaderStyle.Render(pad("      NAME", nameWidth)+"  "+padRight("SIZE / TYPE", sizeWidth)) + "\n"
 	if len(m.browseItems) == 0 {
 		if m.filterScope != "" {
 			body += "No matches. Esc clears the filter.\n"
@@ -212,20 +215,30 @@ func (m bucketsModel) viewDetail() string {
 		if item.IsFolder {
 			size = "Folder"
 		}
-		row := pad(marker+check+item.Name, nameWidth) + " " + size
+		row := pad(marker+check+item.Name, nameWidth) + "  " + padRight(size, sizeWidth)
 		if i == cursor {
 			row = rowSelectedStyle.Render(truncate(row, width))
+		} else {
+			row = rowStyle.Render(row)
 		}
 		body += row + "\n"
 	}
+	body += separator(width) + "\n"
 	if len(m.browseItems) > 0 {
-		body += "Selected: " + m.browseItems[cursor].Key
+		position := fmt.Sprintf("%d / %d", cursor+1, len(m.browseItems))
+		body += dimStyle.Render(pad("Focus: "+m.browseItems[cursor].Name, max(1, width-len(position)-2)) + "  " + position)
+	} else {
+		body += dimStyle.Render("Focus: No file or folder")
 	}
-	footer := "Enter: Open  /: Filter  Space: Select  m: Actions  Tab: Access"
+	footer := "Enter: Open  /: Filter  Space: Select  m: Actions"
+	if width >= 80 {
+		footer += "  i: Full path  Tab: Access"
+	}
 	if m.filterActive {
 		footer = "Type to filter  Enter: Keep results  Esc: Clear"
 	}
-	return renderPanel(title, body, footer, width, m.height)
+	// Keep list boundaries, focused-file context, and actions visible together.
+	return fitTerminal(titleStyle.Render(truncate(title, width))+"\n"+separator(width)+"\n"+body+"\n"+helpStyle.Render(footer), width, m.height)
 }
 
 func (m bucketsModel) viewAccess(title string, width int) string {

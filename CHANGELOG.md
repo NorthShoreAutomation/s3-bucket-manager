@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uploads review their destinations and require explicit overwrite consent. Downloads use a temporary file and publish completed output.
 - Credentials start masked and save to new key-specific files with owner-only permissions. Leaving requires saving or acknowledging capture.
 - Lists and dialogs fit compact terminals, support paging, and preserve visible focus. Help follows the current screen.
+- File browsing separates the location and controls from the table with horizontal rules, a shaded column header, aligned sizes, and distinct focused-file and checked-item labels.
 - Refresh uses `r`; key management uses `K`. File sharing uses `s`, with `c` as a compatibility shortcut to the Share dialog.
 
 ### Fixed

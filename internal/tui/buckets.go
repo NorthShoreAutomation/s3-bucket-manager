@@ -1610,6 +1610,9 @@ func (m bucketsModel) loadBrowse() tea.Cmd {
 
 func (m bucketsModel) browseVisibleRows() int {
 	overhead := 9
+	if m.statusText() != "" {
+		overhead++
+	}
 	avail := m.height - overhead
 	if avail < 1 {
 		avail = 1

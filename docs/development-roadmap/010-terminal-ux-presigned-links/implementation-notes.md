@@ -56,6 +56,14 @@ See the [official Go patch history](https://go.dev/doc/devel/release#go1.26.0).
 
 ## Inspection and ownership
 
+The operator's first terminal inspection identified weak separation between location text and file rows.
+The browser now has horizontal table boundaries, a shaded column header, aligned sizes, and a separate focus line with position.
+`Checked` identifies the bulk selection; `Focus` identifies the row under the cursor.
+Long paths, status messages, and paging keep the focused row and actions visible at supported sizes.
+Dark and light sample previews were inspected together at 60, 80, and 120 columns.
+The regression test failed before this refinement and now passes. Full tests, focused race checks, build, and lint also pass.
+See [browser clarity previews](browser-clarity-captures.md).
+
 Implementation is ready for operator inspection.
 Independent branch review and a pull request follow acceptance in Normal mode. Nothing is merged or released.
 

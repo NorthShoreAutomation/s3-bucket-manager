@@ -67,7 +67,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = size.Width
 		a.height = size.Height
 		a.buckets.width = size.Width
-		a.buckets.height = max(1, size.Height-3)
+		// Preserve browser context and actions at the 12-line minimum window size.
+		a.buckets.height = max(11, size.Height-3)
 		a.users.width = size.Width
 		a.users.height = max(1, size.Height-3)
 		a.buckets.filePicker.width = size.Width

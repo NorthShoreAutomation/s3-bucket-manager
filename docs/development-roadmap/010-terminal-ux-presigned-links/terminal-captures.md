@@ -11,23 +11,25 @@ Color contrast and real terminal behavior still require operator inspection.
 s3m  Account: Unknown  Profile: default  Region: Unknown
 example-bucket  [Files]  Access  Details
 ────────────────────────────────────────────────────────────────────────────────
-s3://example-bucket/資料/long-folder/long-folder/long-folder/
-50 entries  /: Filter  Selected: 0
-  NAME                                                           SIZE
-  [ ] sample-38-資料.txt                                         1.0 KB
-  [ ] sample-39-資料.txt                                         1.0 KB
-  [ ] sample-40-資料.txt                                         1.0 KB
-  [ ] sample-41-資料.txt                                         1.0 KB
-  [ ] sample-42-資料.txt                                         1.0 KB
-  [ ] sample-43-資料.txt                                         1.0 KB
-  [ ] sample-44-資料.txt                                         1.0 KB
-  [ ] sample-45-資料.txt                                         1.0 KB
-  [ ] sample-46-資料.txt                                         1.0 KB
-  [ ] sample-47-資料.txt                                         1.0 KB
-  [ ] sample-48-資料.txt                                         1.0 KB
-> [ ] sample-49-資料.txt                                         1.0 KB
-Selected: 資料/long-folder/long-folder/long-folder/sample-49-資料.txt
-Enter: Open  /: Filter  Space: Select  m: Actions  Tab: Access
+Location: s3://example-bucket/資料/long-folder/long-folder/long-folder/
+50 entries  /: Filter  Checked: 0
+────────────────────────────────────────────────────────────────────────────────
+      NAME                                                           SIZE / TYPE
+  [ ] sample-38-資料.txt                                                  1.0 KB
+  [ ] sample-39-資料.txt                                                  1.0 KB
+  [ ] sample-40-資料.txt                                                  1.0 KB
+  [ ] sample-41-資料.txt                                                  1.0 KB
+  [ ] sample-42-資料.txt                                                  1.0 KB
+  [ ] sample-43-資料.txt                                                  1.0 KB
+  [ ] sample-44-資料.txt                                                  1.0 KB
+  [ ] sample-45-資料.txt                                                  1.0 KB
+  [ ] sample-46-資料.txt                                                  1.0 KB
+  [ ] sample-47-資料.txt                                                  1.0 KB
+  [ ] sample-48-資料.txt                                                  1.0 KB
+> [ ] sample-49-資料.txt                                                  1.0 KB
+────────────────────────────────────────────────────────────────────────────────
+Focus: sample-49-資料.txt                                                50 / 50
+Enter: Open  /: Filter  Space: Select  m: Actions  i: Full path  Tab: Access
 ```
 
 ## Managed users after paging (60x15)
