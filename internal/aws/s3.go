@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -22,51 +23,55 @@ import (
 	"github.com/dcorbell/s3m/internal/model"
 )
 
-// ListBuckets returns all S3 buckets with their region and public status.
-// Region comes directly from the ListBuckets response when the SDK/API populates
-// the BucketRegion field — no extra per-bucket call needed. When the field is
-// empty (old buckets or older API behavior), fall back to a HeadBucket-based
-// lookup so users never need to supply --region manually.
+// ListBuckets returns every page and keeps unreadable public settings unknown.
+// Region comes from the listing, with a lookup for older bucket responses.
 func (c *Client) ListBuckets(ctx context.Context) ([]model.Bucket, error) {
-	output, err := c.S3.ListBuckets(ctx, &s3.ListBucketsInput{})
-	if err != nil {
-		return nil, fmt.Errorf("could not list buckets: %w", err)
-	}
-
-	buckets := make([]model.Bucket, len(output.Buckets))
-	var wg sync.WaitGroup
-	for i, b := range output.Buckets {
-		buckets[i] = model.Bucket{
-			Name:         aws.ToString(b.Name),
-			CreationDate: aws.ToTime(b.CreationDate),
-			Region:       aws.ToString(b.BucketRegion),
+	paginator := s3.NewListBucketsPaginator(c.S3, &s3.ListBucketsInput{})
+	var source []s3types.Bucket
+	tokens := make(map[string]bool)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("could not list buckets: %w", err)
 		}
-		wg.Add(1)
-		go func(idx int, name string, region string) {
-			defer wg.Done()
-
-			if region == "" {
-				if resolved, regionErr := c.GetBucketRegion(ctx, name); regionErr == nil {
-					buckets[idx].Region = resolved
-				}
+		source = append(source, page.Buckets...)
+		token := aws.ToString(page.ContinuationToken)
+		if token != "" {
+			if tokens[token] {
+				return nil, errors.New("bucket list pagination did not advance")
 			}
-
-			pabOutput, err := c.S3.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{
-				Bucket: aws.String(name),
-			}, withBucketRegion(buckets[idx].Region))
-			if err != nil {
-				buckets[idx].IsPublic = true
-			} else {
-				cfg := pabOutput.PublicAccessBlockConfiguration
-				allBlocked := aws.ToBool(cfg.BlockPublicAcls) &&
-					aws.ToBool(cfg.BlockPublicPolicy) &&
-					aws.ToBool(cfg.IgnorePublicAcls) &&
-					aws.ToBool(cfg.RestrictPublicBuckets)
-				buckets[idx].IsPublic = !allBlocked
-			}
-		}(i, aws.ToString(b.Name), aws.ToString(b.BucketRegion))
+			tokens[token] = true
+		}
 	}
-	wg.Wait()
+	buckets := make([]model.Bucket, len(source))
+	for i, b := range source {
+		buckets[i] = model.Bucket{Name: aws.ToString(b.Name), CreationDate: aws.ToTime(b.CreationDate), Region: aws.ToString(b.BucketRegion)}
+	}
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for range min(8, len(buckets)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for idx := range jobs {
+				b := &buckets[idx]
+				if b.Region == "" {
+					if resolved, err := c.GetBucketRegion(ctx, b.Name); err == nil {
+						b.Region = resolved
+					}
+				}
+				b.IsPublic, b.AccessKnown, _ = c.PublicAccessStatus(ctx, b.Name, b.Region)
+			}
+		}()
+	}
+	for i := range buckets {
+		jobs <- i
+	}
+	close(jobs)
+	workers.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return buckets, nil
 }
 
@@ -109,14 +114,14 @@ func (c *Client) CreateBucket(ctx context.Context, name, region string) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("bucket created but could not block public access: %w", err)
+		return &PartialBucketCreationError{Bucket: name, Err: err}
 	}
 
 	return nil
 }
 
 // DeleteBucket deletes an S3 bucket. Retries on 409 (BucketNotEmpty) since S3
-// is eventually consistent after emptying — objects may still appear briefly.
+// is eventually consistent after emptying - objects may still appear briefly.
 func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
 	opts := func(o *s3.Options) {
 		if region != "" {
@@ -130,7 +135,7 @@ func (c *Client) DeleteBucket(ctx context.Context, name, region string) error {
 		if err == nil {
 			return nil
 		}
-		// Check if it's a 409 BucketNotEmpty — retry after a delay
+		// Check if it's a 409 BucketNotEmpty - retry after a delay
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "BucketNotEmpty" && attempt < 4 {
 			time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
@@ -347,6 +352,8 @@ func (c *Client) IsBucketEmpty(ctx context.Context, name, region string) (bool, 
 type BucketStats struct {
 	ObjectCount int64
 	SizeBytes   int64
+	Known       bool
+	UpdatedAt   time.Time
 }
 
 // GetBucketStats fetches object count and size from CloudWatch daily metrics.
@@ -355,52 +362,59 @@ func (c *Client) GetBucketStats(ctx context.Context, bucket, region string) (Buc
 	now := time.Now()
 	start := now.Add(-48 * time.Hour) // look back 2 days to ensure we get a data point
 
-	objectCount := c.getCloudWatchMetric(ctx, bucket, "NumberOfObjects", "AllStorageTypes", region, start, now)
-	sizeBytes := c.getCloudWatchMetric(ctx, bucket, "BucketSizeBytes", "StandardStorage", region, start, now)
-
-	return BucketStats{
-		ObjectCount: int64(objectCount),
-		SizeBytes:   int64(sizeBytes),
-	}, nil
+	objectCount, countErr := c.getCloudWatchMetric(ctx, bucket, "NumberOfObjects", "AllStorageTypes", region, start, now)
+	sizeBytes, sizeErr := c.getCloudWatchMetric(ctx, bucket, "BucketSizeBytes", "StandardStorage", region, start, now)
+	stats := BucketStats{ObjectCount: int64(objectCount.value), SizeBytes: int64(sizeBytes.value), Known: objectCount.known && sizeBytes.known}
+	if stats.Known {
+		stats.UpdatedAt = objectCount.at
+		if sizeBytes.at.Before(stats.UpdatedAt) {
+			stats.UpdatedAt = sizeBytes.at
+		}
+	}
+	return stats, errors.Join(countErr, sizeErr)
 }
 
-func (c *Client) getCloudWatchMetric(ctx context.Context, bucket, metricName, storageType, region string, start, end time.Time) float64 {
-	opts := func(o *cloudwatch.Options) {
+type cloudWatchSample struct {
+	value float64
+	at    time.Time
+	known bool
+}
+
+func (c *Client) getCloudWatchMetric(ctx context.Context, bucket, metricName, storageType, region string, start, end time.Time) (cloudWatchSample, error) {
+	if c.CloudWatch == nil {
+		return cloudWatchSample{}, errors.New("daily metrics are unavailable")
+	}
+	output, err := c.CloudWatch.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+		Namespace: aws.String("AWS/S3"), MetricName: aws.String(metricName), Dimensions: []cwtypes.Dimension{{Name: aws.String("BucketName"), Value: aws.String(bucket)}, {Name: aws.String("StorageType"), Value: aws.String(storageType)}}, StartTime: &start, EndTime: &end, Period: aws.Int32(86400), Statistics: []cwtypes.Statistic{cwtypes.StatisticAverage},
+	}, func(o *cloudwatch.Options) {
 		if region != "" {
 			o.Region = region
 		}
+	})
+	if err != nil {
+		return cloudWatchSample{}, fmt.Errorf("could not read %s daily metric: %w", metricName, err)
 	}
-	output, err := c.CloudWatch.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("AWS/S3"),
-		MetricName: aws.String(metricName),
-		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("BucketName"), Value: aws.String(bucket)},
-			{Name: aws.String("StorageType"), Value: aws.String(storageType)},
-		},
-		StartTime:  &start,
-		EndTime:    &end,
-		Period:     aws.Int32(86400), // 1 day
-		Statistics: []cwtypes.Statistic{cwtypes.StatisticAverage},
-	}, opts)
-	if err != nil || len(output.Datapoints) == 0 {
-		return 0
+	var latest cloudWatchSample
+	if output == nil {
+		return latest, nil
 	}
-	// Return the most recent data point
-	latest := output.Datapoints[0]
-	for _, dp := range output.Datapoints[1:] {
-		if dp.Timestamp.After(*latest.Timestamp) {
-			latest = dp
+	for _, dp := range output.Datapoints {
+		if dp.Timestamp == nil || dp.Timestamp.IsZero() || dp.Average == nil || math.IsNaN(*dp.Average) || math.IsInf(*dp.Average, 0) || *dp.Average < 0 {
+			continue
+		}
+		if !latest.known || dp.Timestamp.After(latest.at) {
+			latest = cloudWatchSample{value: *dp.Average, at: *dp.Timestamp, known: true}
 		}
 	}
-	if latest.Average != nil {
-		return *latest.Average
-	}
-	return 0
+	return latest, nil
 }
 
 // GetBucketObjectCount returns the object count from CloudWatch (convenience wrapper).
 func (c *Client) GetBucketObjectCount(ctx context.Context, bucket, region string) (int64, error) {
 	stats, err := c.GetBucketStats(ctx, bucket, region)
+	if err == nil && !stats.Known {
+		err = errors.New("daily bucket metrics have no usable samples")
+	}
 	return stats.ObjectCount, err
 }
 
@@ -597,6 +611,8 @@ func AutoPartSize(contentLength int64) int64 {
 // via manager.Downloader. partSize and concurrency are optional; pass 0 to
 // use manager defaults. Returns bytes written. Unlike DownloadObject (single
 // GetObject), this parallelizes large downloads and has no 5 GiB ceiling.
+//
+//nolint:staticcheck // Retain the installed multipart manager for this phase.
 func (c *Client) DownloadFile(ctx context.Context, bucket, key, region string, dest io.WriterAt, partSize int64, concurrency int) (int64, error) {
 	downloader := manager.NewDownloader(c.S3, func(d *manager.Downloader) {
 		if partSize > 0 {
@@ -677,15 +693,22 @@ func (c *Client) UploadObjectSized(ctx context.Context, bucket, key, region stri
 // feature/s3/transfermanager (discussion aws-sdk-go-v2#3306), but transfermanager
 // is still in preview as of aws-sdk-go-v2 v1.41.x. Revisit once it reaches GA.
 //
-// Orphaned-parts caveat: if ctx is cancelled mid-upload, manager.Uploader tries
-// to call AbortMultipartUpload using the same cancelled ctx, which typically
-// fails. The partial upload then persists in S3 until a bucket-level
-// AbortIncompleteMultipartUpload lifecycle rule reaps it. Configure such a rule
-// on any bucket used as an UploadStream target to avoid accumulating storage
-// cost from cancelled uploads.
+// Failed multipart transfers retry cleanup using a bounded context independent
+// of cancellation. A bucket lifecycle rule remains useful if cleanup is denied.
 //
 //nolint:staticcheck // manager.Uploader is the current stable multipart API
 func (c *Client) UploadStream(ctx context.Context, bucket, key, region string, body io.Reader, partSize int64, concurrency int) error {
+	return c.uploadStream(ctx, bucket, key, region, body, partSize, concurrency, nil, false)
+}
+
+// UploadStreamConditional rejects newly created or changed destinations.
+// A nil condition requires absence; otherwise it must match the reviewed ETag.
+func (c *Client) UploadStreamConditional(ctx context.Context, bucket, key, region string, body io.Reader, partSize int64, concurrency int, condition *string) error {
+	return c.uploadStream(ctx, bucket, key, region, body, partSize, concurrency, condition, true)
+}
+
+//nolint:staticcheck // manager remains the installed stable multipart API
+func (c *Client) uploadStream(ctx context.Context, bucket, key, region string, body io.Reader, partSize int64, concurrency int, condition *string, conditional bool) error {
 	uploader := manager.NewUploader(c.S3, func(u *manager.Uploader) {
 		if partSize > 0 {
 			u.PartSize = partSize
@@ -694,220 +717,242 @@ func (c *Client) UploadStream(ctx context.Context, bucket, key, region string, b
 			u.Concurrency = concurrency
 		}
 	})
-	var uploadOpts []func(*manager.Uploader)
-	if region != "" {
-		uploadOpts = append(uploadOpts, manager.WithUploaderRequestOptions(func(o *s3.Options) {
-			o.Region = region
-		}))
+	input := &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: body}
+	if conditional {
+		if condition == nil {
+			input.IfNoneMatch = aws.String("*")
+		} else {
+			input.IfMatch = condition
+		}
 	}
-	_, err := uploader.Upload(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-		Body:   body,
-	}, uploadOpts...)
+	opts := manager.WithUploaderRequestOptions(func(o *s3.Options) {
+		if region != "" {
+			o.Region = region
+		}
+	})
+	_, err := uploader.Upload(ctx, input, opts)
 	if err != nil {
+		var failed manager.MultiUploadFailure
+		if errors.As(err, &failed) && failed.UploadID() != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			_, cleanupErr := c.S3.AbortMultipartUpload(cleanupCtx, &s3.AbortMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String(key), UploadId: aws.String(failed.UploadID())}, func(o *s3.Options) {
+				if region != "" {
+					o.Region = region
+				}
+			})
+			cancel()
+			if cleanupErr != nil {
+				return fmt.Errorf("could not upload %q: %w; multipart cleanup failed: %v", key, err, cleanupErr)
+			}
+		}
 		return fmt.Errorf("could not upload %q: %w", key, err)
 	}
 	return nil
 }
 
-// policyDocument represents an S3 bucket policy.
-type policyDocument struct {
-	Version   string            `json:"Version"`
-	Statement []policyStatement `json:"Statement"`
+// rawBucketPolicy keeps unrelated policy fields and statements intact.
+type rawBucketPolicy struct {
+	document   map[string]json.RawMessage
+	statements []json.RawMessage
 }
 
-type policyStatement struct {
-	Sid       string `json:"Sid"`
-	Effect    string `json:"Effect"`
-	Principal string `json:"Principal"`
-	Action    string `json:"Action"`
-	Resource  string `json:"Resource"`
-}
-
-// GetPrefixAccessStatus checks which prefixes are public based on bucket policy.
-func (c *Client) GetPrefixAccessStatus(ctx context.Context, bucket, region string, prefixes []string) ([]model.PrefixAccess, error) {
-	publicPrefixes := make(map[string]bool)
-	opts := func(o *s3.Options) {
-		if region != "" {
-			o.Region = region
+func (c *Client) readBucketPolicy(ctx context.Context, bucket, region string) (rawBucketPolicy, bool, error) {
+	out, err := c.S3.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{Bucket: aws.String(bucket)}, withBucketRegion(region))
+	if err != nil {
+		var api smithy.APIError
+		if errors.As(err, &api) && api.ErrorCode() == "NoSuchBucketPolicy" {
+			return rawBucketPolicy{document: map[string]json.RawMessage{"Version": json.RawMessage(`"2012-10-17"`)}}, false, nil
 		}
+		return rawBucketPolicy{}, false, fmt.Errorf("could not read bucket policy for %q: %w", bucket, err)
 	}
-
-	policyOutput, err := c.S3.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
-		Bucket: aws.String(bucket),
-	}, opts)
-	if err == nil && policyOutput.Policy != nil {
-		var doc policyDocument
-		if jsonErr := json.Unmarshal([]byte(aws.ToString(policyOutput.Policy)), &doc); jsonErr == nil {
-			for _, stmt := range doc.Statement {
-				if stmt.Effect == "Allow" && stmt.Principal == "*" && stmt.Action == "s3:GetObject" {
-					// Extract prefix from resource ARN
-					arnPrefix := fmt.Sprintf("arn:aws:s3:::%s/", bucket)
-					if strings.HasPrefix(stmt.Resource, arnPrefix) {
-						prefix := strings.TrimPrefix(stmt.Resource, arnPrefix)
-						prefix = strings.TrimSuffix(prefix, "*")
-						publicPrefixes[prefix] = true
-					}
-				}
+	if out == nil || out.Policy == nil {
+		return rawBucketPolicy{}, false, fmt.Errorf("bucket policy response for %q was empty", bucket)
+	}
+	var doc map[string]json.RawMessage
+	if err = json.Unmarshal([]byte(*out.Policy), &doc); err != nil || doc == nil {
+		return rawBucketPolicy{}, false, fmt.Errorf("bucket policy for %q is not a valid JSON object", bucket)
+	}
+	raw, ok := doc["Statement"]
+	if !ok {
+		return rawBucketPolicy{}, false, fmt.Errorf("bucket policy for %q has no statements", bucket)
+	}
+	var statements []json.RawMessage
+	if err = json.Unmarshal(raw, &statements); err != nil {
+		var single map[string]json.RawMessage
+		if json.Unmarshal(raw, &single) != nil || single == nil {
+			return rawBucketPolicy{}, false, fmt.Errorf("bucket policy for %q has invalid statements", bucket)
+		}
+		statements = []json.RawMessage{raw}
+	}
+	if statements == nil {
+		return rawBucketPolicy{}, false, fmt.Errorf("bucket policy for %q has null statements", bucket)
+	}
+	for _, statement := range statements {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(statement, &fields) != nil || len(fields) == 0 {
+			return rawBucketPolicy{}, false, fmt.Errorf("bucket policy for %q has an invalid statement", bucket)
+		}
+		effect := policyString(fields["Effect"])
+		if effect != "Allow" && effect != "Deny" {
+			return rawBucketPolicy{}, false, fmt.Errorf("bucket policy for %q has an invalid statement effect", bucket)
+		}
+		if sid, exists := fields["Sid"]; exists {
+			var value string
+			if json.Unmarshal(sid, &value) != nil {
+				return rawBucketPolicy{}, false, fmt.Errorf("bucket policy for %q has an invalid statement identifier", bucket)
 			}
 		}
 	}
+	return rawBucketPolicy{document: doc, statements: statements}, true, nil
+}
+func (policy rawBucketPolicy) encode(statements []json.RawMessage) (string, error) {
+	encoded, err := json.Marshal(statements)
+	if err != nil {
+		return "", err
+	}
+	policy.document["Statement"] = encoded
+	document, err := json.Marshal(policy.document)
+	return string(document), err
+}
+func policyString(raw json.RawMessage) string {
+	var value string
+	_ = json.Unmarshal(raw, &value)
+	return value
+}
+func policyStatementFields(raw json.RawMessage) map[string]json.RawMessage {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &fields)
+	return fields
+}
+func policyContains(raw json.RawMessage, value string) bool {
+	if policyString(raw) == value {
+		return true
+	}
+	var values []string
+	if json.Unmarshal(raw, &values) != nil {
+		return false
+	}
+	for _, v := range values {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+func policyPublicPrincipal(raw json.RawMessage) bool {
+	if policyString(raw) == "*" {
+		return true
+	}
+	var principal map[string]json.RawMessage
+	if json.Unmarshal(raw, &principal) != nil {
+		return false
+	}
+	return policyContains(principal["AWS"], "*")
+}
+func publicPrefixSID(prefix string) string { return "s3m-public-" + strings.TrimSuffix(prefix, "/") }
 
+// GetPrefixAccessStatus reports explicit s3m-managed read grants, not reachability.
+func (c *Client) GetPrefixAccessStatus(ctx context.Context, bucket, region string, prefixes []string) ([]model.PrefixAccess, error) {
+	policy, _, err := c.readBucketPolicy(ctx, bucket, region)
+	if err != nil {
+		return nil, err
+	}
 	accesses := make([]model.PrefixAccess, 0, len(prefixes))
-	for _, p := range prefixes {
-		accesses = append(accesses, model.PrefixAccess{
-			Prefix:   p,
-			IsPublic: publicPrefixes[p],
-		})
+	for _, prefix := range prefixes {
+		access := model.PrefixAccess{Prefix: prefix}
+		for _, raw := range policy.statements {
+			statement := policyStatementFields(raw)
+			if policyString(statement["Sid"]) == publicPrefixSID(prefix) && policyString(statement["Effect"]) == "Allow" && policyPublicPrincipal(statement["Principal"]) && policyContains(statement["Action"], "s3:GetObject") && policyContains(statement["Resource"], fmt.Sprintf("arn:aws:s3:::%s/%s*", bucket, prefix)) {
+				access.IsPublic = true
+				break
+			}
+		}
+		accesses = append(accesses, access)
 	}
 	return accesses, nil
 }
 
-// SetPrefixPublic makes a prefix publicly readable by adding a bucket policy statement.
+// SetPrefixPublic reads and validates policy before changing public settings.
 func (c *Client) SetPrefixPublic(ctx context.Context, bucket, prefix, region string) error {
-	opts := func(o *s3.Options) {
-		if region != "" {
-			o.Region = region
+	policy, _, err := c.readBucketPolicy(ctx, bucket, region)
+	if err != nil {
+		return err
+	}
+	sid := publicPrefixSID(prefix)
+	filtered := make([]json.RawMessage, 0, len(policy.statements)+1)
+	for _, statement := range policy.statements {
+		if policyString(policyStatementFields(statement)["Sid"]) != sid {
+			filtered = append(filtered, statement)
 		}
 	}
-
-	// First ensure public access block allows public policies
-	_, err := c.S3.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{
-		Bucket: aws.String(bucket),
-		PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{
-			BlockPublicAcls:       aws.Bool(true),
-			BlockPublicPolicy:     aws.Bool(false), // Allow public policies
-			IgnorePublicAcls:      aws.Bool(true),
-			RestrictPublicBuckets: aws.Bool(false), // Allow public access
-		},
-	}, opts)
+	grant, err := json.Marshal(map[string]string{"Sid": sid, "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": fmt.Sprintf("arn:aws:s3:::%s/%s*", bucket, prefix)})
+	if err != nil {
+		return fmt.Errorf("could not build public grant: %w", err)
+	}
+	filtered = append(filtered, grant)
+	encoded, err := policy.encode(filtered)
+	if err != nil {
+		return fmt.Errorf("could not build bucket policy: %w", err)
+	}
+	_, err = c.S3.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{Bucket: aws.String(bucket), PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{BlockPublicAcls: aws.Bool(true), BlockPublicPolicy: aws.Bool(false), IgnorePublicAcls: aws.Bool(true), RestrictPublicBuckets: aws.Bool(false)}}, withBucketRegion(region))
 	if err != nil {
 		return fmt.Errorf("could not update public access settings: %w", err)
 	}
-
-	// Get existing policy or create new one
-	doc := policyDocument{Version: "2012-10-17"}
-	policyOutput, err := c.S3.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
-		Bucket: aws.String(bucket),
-	}, opts)
-	if err == nil && policyOutput.Policy != nil {
-		json.Unmarshal([]byte(aws.ToString(policyOutput.Policy)), &doc) //nolint:errcheck // best-effort parse; empty doc is fine on failure
-	}
-
-	// Build sid from prefix (e.g., "installers/" -> "s3m-public-installers")
-	sid := "s3m-public-" + strings.TrimSuffix(prefix, "/")
-
-	// Remove existing statement for this prefix if any
-	filtered := make([]policyStatement, 0, len(doc.Statement))
-	for _, stmt := range doc.Statement {
-		if stmt.Sid != sid {
-			filtered = append(filtered, stmt)
-		}
-	}
-
-	// Add new public statement
-	resource := fmt.Sprintf("arn:aws:s3:::%s/%s*", bucket, prefix)
-	filtered = append(filtered, policyStatement{
-		Sid:       sid,
-		Effect:    "Allow",
-		Principal: "*",
-		Action:    "s3:GetObject",
-		Resource:  resource,
-	})
-	doc.Statement = filtered
-
-	policyJSON, err := json.Marshal(doc)
+	_, err = c.S3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{Bucket: aws.String(bucket), Policy: aws.String(encoded)}, withBucketRegion(region))
 	if err != nil {
-		return fmt.Errorf("could not build policy: %w", err)
-	}
-
-	_, err = c.S3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
-		Bucket: aws.String(bucket),
-		Policy: aws.String(string(policyJSON)),
-	}, opts)
-	if err != nil {
-		return fmt.Errorf("could not set prefix %q as public: %w", prefix, err)
+		return fmt.Errorf("public access block settings changed, but the requested grant for %q was not applied: %w", prefix, err)
 	}
 	return nil
 }
 
-// SetPrefixPrivate removes the public access policy statement for a prefix.
+// SetPrefixPrivate removes only the named s3m-managed public grant.
 func (c *Client) SetPrefixPrivate(ctx context.Context, bucket, prefix, region string) error {
 	return c.SetPrefixesPrivate(ctx, bucket, []string{prefix}, region)
 }
 
-// SetPrefixesPrivate removes public-access policy statements for prefixes in one policy rewrite.
+// SetPrefixesPrivate preserves every unrelated statement and reports partial changes.
 func (c *Client) SetPrefixesPrivate(ctx context.Context, bucket string, prefixes []string, region string) error {
-	sids := make(map[string]struct{}, len(prefixes))
-	for _, prefix := range prefixes {
-		sids["s3m-public-"+strings.TrimSuffix(prefix, "/")] = struct{}{}
-	}
-	opts := func(o *s3.Options) {
-		if region != "" {
-			o.Region = region
-		}
-	}
-
-	policyOutput, err := c.S3.GetBucketPolicy(ctx, &s3.GetBucketPolicyInput{
-		Bucket: aws.String(bucket),
-	}, opts)
+	policy, exists, err := c.readBucketPolicy(ctx, bucket, region)
 	if err != nil {
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucketPolicy" {
-			return nil
-		}
-		return fmt.Errorf("could not read bucket policy for %q: %w", bucket, err)
+		return err
 	}
-
-	var doc policyDocument
-	if err := json.Unmarshal([]byte(aws.ToString(policyOutput.Policy)), &doc); err != nil {
+	if !exists {
 		return nil
 	}
-
-	// Remove the statement for this prefix
-	filtered := make([]policyStatement, 0, len(doc.Statement))
+	sids := make(map[string]bool, len(prefixes))
+	for _, prefix := range prefixes {
+		sids[publicPrefixSID(prefix)] = true
+	}
+	filtered := make([]json.RawMessage, 0, len(policy.statements))
 	removed := false
-	for _, stmt := range doc.Statement {
-		if _, shouldRemove := sids[stmt.Sid]; !shouldRemove {
-			filtered = append(filtered, stmt)
-		} else {
+	for _, statement := range policy.statements {
+		if sids[policyString(policyStatementFields(statement)["Sid"])] {
 			removed = true
+		} else {
+			filtered = append(filtered, statement)
 		}
 	}
 	if !removed {
 		return nil
 	}
-
 	if len(filtered) == 0 {
-		// No statements left, delete the policy and re-block public access
-		c.S3.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{ //nolint:errcheck // best-effort cleanup when removing all public access
-			Bucket: aws.String(bucket),
-		}, opts)
-		c.S3.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{ //nolint:errcheck // best-effort restore of public access block
-			Bucket: aws.String(bucket),
-			PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{
-				BlockPublicAcls:       aws.Bool(true),
-				BlockPublicPolicy:     aws.Bool(true),
-				IgnorePublicAcls:      aws.Bool(true),
-				RestrictPublicBuckets: aws.Bool(true),
-			},
-		}, opts)
+		_, err = c.S3.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{Bucket: aws.String(bucket)}, withBucketRegion(region))
+		if err != nil {
+			return fmt.Errorf("could not remove managed public grants: %w", err)
+		}
+		_, err = c.S3.PutPublicAccessBlock(ctx, &s3.PutPublicAccessBlockInput{Bucket: aws.String(bucket), PublicAccessBlockConfiguration: &s3types.PublicAccessBlockConfiguration{BlockPublicAcls: aws.Bool(true), BlockPublicPolicy: aws.Bool(true), IgnorePublicAcls: aws.Bool(true), RestrictPublicBuckets: aws.Bool(true)}}, withBucketRegion(region))
+		if err != nil {
+			return fmt.Errorf("managed public grants were removed, but public access blocks could not be restored: %w", err)
+		}
 		return nil
 	}
-
-	doc.Statement = filtered
-	policyJSON, err := json.Marshal(doc)
+	encoded, err := policy.encode(filtered)
 	if err != nil {
-		return fmt.Errorf("could not build policy: %w", err)
+		return fmt.Errorf("could not build bucket policy: %w", err)
 	}
-
-	_, err = c.S3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
-		Bucket: aws.String(bucket),
-		Policy: aws.String(string(policyJSON)),
-	}, opts)
+	_, err = c.S3.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{Bucket: aws.String(bucket), Policy: aws.String(encoded)}, withBucketRegion(region))
 	if err != nil {
-		return fmt.Errorf("could not remove public access for selected prefixes: %w", err)
+		return fmt.Errorf("could not remove selected managed public grants: %w", err)
 	}
 	return nil
 }

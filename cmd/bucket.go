@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	awsClient "github.com/dcorbell/s3m/internal/aws"
+	"github.com/dcorbell/s3m/internal/model"
 )
 
 var bucketCmd = &cobra.Command{
@@ -32,28 +34,47 @@ var bucketListCmd = &cobra.Command{
 			return fmt.Errorf("Could not list buckets: %w", err)
 		}
 
-		if jsonOut {
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(buckets)
-		}
-
-		if len(buckets) == 0 {
-			fmt.Println("No buckets found. Create one with: s3m bucket create <name>")
-			return nil
-		}
-
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tREGION\tACCESS\tCREATED")
+		rows := make([]bucketListEntry, 0, len(buckets))
 		for _, b := range buckets {
-			access := "private"
-			if b.IsPublic {
-				access = "public"
+			row := bucketListEntry{Bucket: b, AccessKnown: b.AccessKnown, PublicSettings: "unknown"}
+			if b.AccessKnown {
+				row.PublicSettings = "blocked"
+				if b.IsPublic {
+					row.PublicSettings = "not fully blocked"
+				}
+			} else {
+				row.MetadataError = "Public settings could not be read."
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", b.Name, b.Region, access, b.CreationDate.Format("2006-01-02"))
+			rows = append(rows, row)
 		}
-		return w.Flush()
+		return writeBucketList(cmd.OutOrStdout(), rows, jsonOut)
 	},
+}
+
+// bucketListEntry preserves the existing JSON fields and adds metadata status.
+type bucketListEntry struct {
+	model.Bucket
+	AccessKnown    bool
+	PublicSettings string
+	MetadataError  string `json:",omitempty"`
+}
+
+func writeBucketList(out io.Writer, rows []bucketListEntry, asJSON bool) error {
+	if asJSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(rows)
+	}
+	if len(rows) == 0 {
+		_, err := fmt.Fprintln(out, "No buckets found. Create one with: s3m bucket create <name>")
+		return err
+	}
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tREGION\tPUBLIC SETTINGS\tCREATED")
+	for _, b := range rows {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", b.Name, b.Region, b.PublicSettings, b.CreationDate.Format("2006-01-02"))
+	}
+	return w.Flush()
 }
 
 var bucketCreateCmd = &cobra.Command{

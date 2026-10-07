@@ -6,7 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Live name filtering with `/` for buckets, current-folder files, managed users, and pickers. Escape restores the full list.
+- Temporary download links for individual files, with preset or custom durations, credential-expiry confirmation, clipboard retry, and a full-link display.
+- Guided access-key management with explicit creation, reversible deactivation, and confirmation before deleting an inactive key.
+
+### Changed
+- Buckets open into Files. Access and Details have separate views. Enter opens folders, and permission changes require review.
+- Uploads review their destinations and require explicit overwrite consent. Downloads use a temporary file and publish completed output.
+- Credentials start masked and save to new key-specific files with owner-only permissions. Leaving requires saving or acknowledging capture.
+- Lists and dialogs fit compact terminals, support paging, and preserve visible focus. Help follows the current screen.
+- File browsing separates the location and controls from the table with horizontal rules, a shaded column header, aligned sizes, and distinct focused-file and checked-item labels.
+- Refresh uses `r`; key management uses `K`. File sharing uses `s`, with `c` as a compatibility shortcut to the Share dialog.
+
 ### Fixed
+- Builds select Go 1.26.8 to avoid vulnerabilities in the previous Go 1.26.1 standard library.
+- Delayed resource responses no longer replace newer listings or disappear after switching screens.
+- Public settings, partial IAM listings, unavailable key counts, and missing CloudWatch metrics retain explicit unknown states.
+- Cancellation waits for operation completion and preserves returned credentials and completed changes.
+- Stopped folder and selection deletes retain their completed-deletion counts through refresh. Delayed folder counts and errors cannot attach to another bucket or a newer browse request.
 - Release pipeline: `auto-release.yml` now explicitly dispatches `release.yml` via `gh workflow run` after pushing the version tag. Tag pushes made with `GITHUB_TOKEN` do not trigger workflows (GitHub anti-recursion rule), so `release.yml` never ran for v0.1.0–v0.6.0 despite the tags being created. `release.yml` gains a `workflow_dispatch` trigger with a `tag` input so the dispatched run (and manual backfills) can check out the right tag before running GoReleaser.
 - Empty bucket detail view no longer leaves the user stuck. `[n]` New folder, `[p]` Upload, and `[U]` URL upload now work directly from the bucket-detail / prefix-list view and target the bucket root, and are advertised in the footer help. Previously these keys were only wired up inside the browse view, so a freshly created bucket had no path to add content other than first adding a "prefix".
 

@@ -340,16 +340,20 @@ func TestAppDoesNotRecordBulkDeleteCancellationAsGlobalError(t *testing.T) {
 	}
 }
 
-func TestAppCancelsBulkDeleteBeforeQuitting(t *testing.T) {
+func TestAppConfirmsBulkDeleteCancellationAndWaitsBeforeQuitting(t *testing.T) {
 	cancelled := false
 	app := App{screen: screenBuckets, buckets: bucketsModel{
 		bulkDeleting:     true,
 		bulkDeleteCancel: func() { cancelled = true },
 	}}
 
-	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	if !cancelled || cmd == nil {
-		t.Fatalf("expected quit to cancel bulk delete before returning quit command, cancelled=%v", cancelled)
+	next, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cancelled || cmd != nil || !next.(App).quitPrompt {
+		t.Fatal("quit must offer Stay or Cancel and quit")
+	}
+	next, cmd = next.(App).Update(key("y"))
+	if !cancelled || cmd != nil || !next.(App).buckets.quitAfterCancel {
+		t.Fatal("cancel must wait for worker acknowledgement")
 	}
 }
 
@@ -474,6 +478,7 @@ func TestBucketDetailShowsLoadErrorInsteadOfEmptyState(t *testing.T) {
 		mode:  bucketDetail,
 	}
 	m.bucketUsersError = "failed to fetch access"
+	m.detailTab = 1
 
 	view := m.viewDetail()
 
@@ -513,7 +518,7 @@ func TestBucketsRendersFriendlyIAMAccessDeniedMessage(t *testing.T) {
 
 func TestBucketsRendersRawErrorForUnrelatedFailures(t *testing.T) {
 	// Non-IAM errors (throttling, network, etc.) should still bubble up as-is so
-	// operators can diagnose real failures — only AccessDenied on iam:ListUsers
+	// operators can diagnose real failures - only AccessDenied on iam:ListUsers
 	// gets the friendly substitution.
 	m := bucketsModel{
 		items: []bucketItem{{name: "bucket-a", region: "us-west-2"}},
@@ -554,9 +559,10 @@ func TestDirectBucketDetailKeepsLoadingStateUntilUsersArrive(t *testing.T) {
 			{prefix: "installers/"},
 		},
 	})
+	updated.detailTab = 1
 	view := updated.viewDetail()
 
-	if !strings.Contains(view, "Loading user access...") {
+	if !strings.Contains(view, "Loading assigned users...") {
 		t.Fatalf("expected direct bucket detail to keep user access in loading state, got %q", view)
 	}
 	if strings.Contains(view, "No users assigned.") {
@@ -569,6 +575,7 @@ func TestBucketDetailShowsUnknownCreatedWhenUnavailable(t *testing.T) {
 		items: []bucketItem{{name: "bucket-a", region: "us-west-2"}},
 		mode:  bucketDetail,
 	}
+	m.detailTab = 2
 
 	view := m.viewDetail()
 

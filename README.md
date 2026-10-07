@@ -18,7 +18,8 @@ go build -o bin/s3m .
 
 ## Prerequisites
 
-- Go 1.21+
+- Go 1.26.1+
+- The module selects the patched Go 1.26.8 build toolchain automatically. Keep automatic toolchain selection enabled.
 - AWS credentials configured (`~/.aws/credentials` or environment variables)
 - IAM permissions: S3 (full), IAM (CreateUser, DeleteUser, TagUser, etc.), STS (GetCallerIdentity)
 
@@ -37,11 +38,36 @@ s3m --bucket my-bucket   # Open directly inside bucket (skips bucket list;
 ```
 
 **Keyboard shortcuts:**
-- `b` Buckets, `u` Users, `a` Access control
-- `c` Create, `d` Delete, `r` Rotate key
-- `Enter` Select/drill in, `Esc` Go back
-- In the file browser: `p` upload from disk, `g` download, `U` upload from URL
-- `?` Help, `q` Quit
+
+- `b` opens Buckets. `u` opens Managed users. `r` refreshes the current view.
+- `/` activates a filter. Each character immediately narrows names, without pressing Enter.
+- Filtering ignores case and matches any part of a name. It searches all loaded buckets or files and folders in the current folder, across listing pages.
+- `Enter` keeps filtered results and returns focus to the list. `Esc` clears the filter and restores all entries.
+- `Enter` or Right opens a bucket or folder. Left or `Esc` returns to the parent.
+- `Tab` switches between Files, Access, and Details. Access changes require a review and explicit confirmation.
+- In Files: Space selects, `a` selects displayed results or clears selection, `n` creates a folder, and `d` reviews deletion.
+- `p` uploads from disk, `U` uploads from a URL, and `g` downloads to a chosen path. Existing destinations require explicit overwrite consent.
+- `s` opens Share for the focused file. `i` shows its full path. `m` or `?` shows available actions.
+- In Managed users: `c` creates a user, Enter reviews access, and `K` manages access keys. `r` never creates a key.
+- `q` quits. During an operation, choose Stay or Cancel and quit. Cancellation waits for a result.
+
+**Temporary download links:**
+
+Select a file, press `s`, choose 1 hour, 24 hours, 7 days, or Custom, then review and generate.
+Custom durations accept whole minutes, hours, or days, such as `30m`, `2h`, or `3d`, within 1 minute to 7 days.
+The app copies the generated link. If copying fails, press `c` to retry the same link or `s` to show it.
+Anyone with the link can download while access remains valid.
+
+Temporary credentials can expire before the selected duration. The app asks before using a known shorter session lifetime.
+The displayed expiration is an upper limit. Policies, revoked credentials, or session expiry can end access sooner.
+Signing does not change public access settings. Existing public grants remain active until you change them separately.
+
+**Credentials and access keys:**
+
+Secrets start masked. Reveal, copy, or save them before leaving the one-time credential screen.
+Saving creates a new, key-specific file with owner-only permissions and refuses to replace an existing file.
+Creating a replacement key leaves the previous key active. Update dependent applications before explicitly deactivating it.
+Delete an inactive key only after verifying its replacement. IAM allows two keys per user.
 
 ### CLI Mode
 
@@ -89,7 +115,8 @@ the source omits `Content-Length`. Memory cost is roughly `partSize × concurren
 
 ### Buckets
 - Creates buckets with public access blocked by default
-- Shows region, public/private status, and object count
+- Shows region and known or unknown public block settings, without claiming verified public reachability
+- Shows dated daily object counts and Standard storage size when CloudWatch samples are available
 
 ### Users
 - Creates IAM users tagged `s3m:managed=true`

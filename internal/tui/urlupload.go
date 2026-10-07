@@ -25,10 +25,13 @@ type urlUploadPhase int
 const (
 	urlUploadPhaseInput    urlUploadPhase = iota // URL + key text inputs
 	urlUploadPhaseProgress                       // spinner / progress bar
+	urlUploadPhaseResolve
+	urlUploadPhaseReview
 )
 
 // urlUploadDoneMsg is emitted when the upload completes successfully.
 type urlUploadDoneMsg struct {
+	ID    uint64
 	Key   string
 	Bytes int64
 }
@@ -36,8 +39,21 @@ type urlUploadDoneMsg struct {
 // urlUploadErrMsg is emitted on failure (including cancellation).
 // The Err.Error() string contains "cancelled" when the user pressed Ctrl-C or Esc.
 type urlUploadErrMsg struct {
+	ID  uint64
 	Err error
 }
+
+type urlUploadResolvedMsg struct {
+	ID        uint64
+	resolved  httpcopy.Resolved
+	condition *string
+}
+type urlUploadResolveFailedMsg struct {
+	ID  uint64
+	err error
+}
+
+var urlUploadIDs atomic.Uint64
 
 // urlUploadProgressTickMsg is emitted by the 4Hz ticker to pull the latest
 // progress snapshot into the Bubble Tea update loop.
@@ -64,10 +80,15 @@ type sharedSnap struct {
 // and listens for urlUploadDoneMsg / urlUploadErrMsg to return to browsing.
 type urlUploadModel struct {
 	// configuration
-	aws    *awsClient.Client
-	bucket string
-	region string
-	prefix string // current S3 prefix (used to build the default key suffix)
+	id         uint64
+	resolved   httpcopy.Resolved
+	condition  *string
+	inputError string
+	cancelling bool
+	aws        *awsClient.Client
+	bucket     string
+	region     string
+	prefix     string // current S3 prefix (used to build the default key suffix)
 
 	// UI state
 	phase       urlUploadPhase
@@ -92,8 +113,6 @@ type urlUploadModel struct {
 	width int
 }
 
-var urlUploadLabelStyle = lipgloss.NewStyle().Foreground(colorMuted)
-
 // newURLUpload returns a configured urlUploadModel ready for Init / Update / View.
 func newURLUpload(client *awsClient.Client, bucket, region, currentPrefix string) urlUploadModel {
 	urlIn := textinput.New()
@@ -116,6 +135,7 @@ func newURLUpload(client *awsClient.Client, bucket, region, currentPrefix string
 	bar.Width = 60
 
 	return urlUploadModel{
+		id:          urlUploadIDs.Add(1),
 		aws:         client,
 		bucket:      bucket,
 		region:      region,
@@ -129,6 +149,11 @@ func newURLUpload(client *awsClient.Client, bucket, region, currentPrefix string
 	}
 }
 
+// Active reports remote work that must acknowledge cancellation before dismissal.
+func (m urlUploadModel) Active() bool {
+	return m.phase == urlUploadPhaseResolve || m.phase == urlUploadPhaseProgress
+}
+
 // Init starts the cursor blink for the URL input.
 func (m urlUploadModel) Init() tea.Cmd {
 	return textinput.Blink
@@ -136,11 +161,72 @@ func (m urlUploadModel) Init() tea.Cmd {
 
 // Update routes messages to the active phase handler.
 func (m urlUploadModel) Update(msg tea.Msg) (urlUploadModel, tea.Cmd) {
+	switch event := msg.(type) {
+	case urlUploadResolvedMsg:
+		if event.ID != m.id {
+			return m, nil
+		}
+		if m.cancelling {
+			return m, func() tea.Msg { return urlUploadErrMsg{ID: m.id, Err: fmt.Errorf("cancelled")} }
+		}
+		m.resolved = event.resolved
+		m.condition = event.condition
+		m.phase = urlUploadPhaseReview
+		m.cancel = nil
+		return m, nil
+	case urlUploadResolveFailedMsg:
+		if event.ID != m.id {
+			return m, nil
+		}
+		if m.cancelling {
+			return m, func() tea.Msg { return urlUploadErrMsg{ID: m.id, Err: fmt.Errorf("cancelled")} }
+		}
+		m.phase = urlUploadPhaseInput
+		m.inputError = event.err.Error()
+		m.cancel = nil
+		m.cancelling = false
+		return m, textinput.Blink
+	}
 	switch m.phase {
 	case urlUploadPhaseInput:
 		return m.updateInput(msg)
 	case urlUploadPhaseProgress:
 		return m.updateProgress(msg)
+	case urlUploadPhaseResolve:
+		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "ctrl+c") {
+			if m.cancel != nil {
+				m.cancel()
+			}
+			m.cancelling = true
+			return m, nil
+		}
+		if _, ok := msg.(spinner.TickMsg); ok {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+	case urlUploadPhaseReview:
+		if key, ok := msg.(tea.KeyMsg); ok {
+			switch key.String() {
+			case "esc", "ctrl+c":
+				return m, func() tea.Msg { return urlUploadErrMsg{ID: m.id, Err: fmt.Errorf("cancelled")} }
+			case "r":
+				m.phase = urlUploadPhaseInput
+				m.activeInput = 1
+				m.keyInput.SetValue(m.resolved.Key)
+				m.urlInput.Blur()
+				m.keyInput.Focus()
+				return m, textinput.Blink
+			case "enter":
+				if m.condition == nil {
+					return m.startUpload()
+				}
+			case "o":
+				if m.condition != nil {
+					return m.startUpload()
+				}
+			}
+		}
 	}
 	return m, nil
 }
@@ -149,9 +235,9 @@ func (m urlUploadModel) updateInput(msg tea.Msg) (urlUploadModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "esc":
+		case "esc", "ctrl+c":
 			return m, func() tea.Msg {
-				return urlUploadErrMsg{Err: fmt.Errorf("cancelled")}
+				return urlUploadErrMsg{ID: m.id, Err: fmt.Errorf("cancelled")}
 			}
 
 		case "tab":
@@ -168,7 +254,7 @@ func (m urlUploadModel) updateInput(msg tea.Msg) (urlUploadModel, tea.Cmd) {
 		case "enter":
 			rawURL := strings.TrimSpace(m.urlInput.Value())
 			if rawURL == "" {
-				return m, nil // no URL yet — ignore
+				return m, nil // no URL yet - ignore
 			}
 			key := strings.TrimSpace(m.keyInput.Value())
 			if key == "" {
@@ -176,58 +262,24 @@ func (m urlUploadModel) updateInput(msg tea.Msg) (urlUploadModel, tea.Cmd) {
 				key = m.prefix
 			}
 
-			// Allocate shared snapshot slot on the heap so the goroutine and
-			// the (value-copied) model can both reference the same atomic.
-			shared := &sharedSnap{}
-			initialSnap := &progressSnapshot{phase: "resolving", total: -1}
-			shared.ptr.Store(initialSnap)
-			m.snap = shared
-
 			ctx, cancel := context.WithCancel(context.Background())
 			m.cancel = cancel
-			m.phase = urlUploadPhaseProgress
-			m.lastTime = time.Now()
-
-			// Capture by value so the goroutine closure is self-contained.
-			uploader := m.aws
-			bucket := m.bucket
-			region := m.region
-
-			runCmd := func() tea.Msg {
-				finalKey, err := httpcopy.Run(ctx, uploader, httpcopy.Options{
-					URL:    rawURL,
-					Bucket: bucket,
-					Key:    key,
-					Region: region,
-					Progress: func(p httpcopy.Progress) {
-						shared.ptr.Store(&progressSnapshot{
-							done:  p.BytesDone,
-							total: p.BytesTotal,
-							phase: p.Phase,
-							key:   p.Filename,
-						})
-					},
-				})
-				cancel()
+			m.phase = urlUploadPhaseResolve
+			m.inputError = ""
+			m.cancelling = false
+			uploader, bucket, region, id := m.aws, m.bucket, m.region, m.id
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				defer cancel()
+				resolved, err := httpcopy.Resolve(ctx, httpcopy.Options{URL: rawURL, Key: key})
 				if err != nil {
-					if errors.Is(err, context.Canceled) {
-						return urlUploadErrMsg{Err: fmt.Errorf("cancelled")}
-					}
-					return urlUploadErrMsg{Err: err}
+					return urlUploadResolveFailedMsg{ID: id, err: err}
 				}
-				snap := shared.ptr.Load()
-				bytes := int64(0)
-				if snap != nil {
-					bytes = snap.done
+				condition, err := uploader.ObjectWriteCondition(ctx, bucket, resolved.Key, region)
+				if err != nil {
+					return urlUploadResolveFailedMsg{ID: id, err: err}
 				}
-				return urlUploadDoneMsg{Key: finalKey, Bytes: bytes}
-			}
-
-			tickCmd := tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
-				return urlUploadProgressTickMsg{}
+				return urlUploadResolvedMsg{ID: id, resolved: resolved, condition: condition}
 			})
-
-			return m, tea.Batch(m.spinner.Tick, runCmd, tickCmd)
 		}
 	}
 
@@ -241,10 +293,61 @@ func (m urlUploadModel) updateInput(msg tea.Msg) (urlUploadModel, tea.Cmd) {
 	return m, cmd
 }
 
+// failed preserves editable inputs after a rejected or failed upload.
+func (m urlUploadModel) failed(err error) urlUploadModel {
+	m.phase = urlUploadPhaseInput
+	m.inputError = err.Error()
+	m.cancel = nil
+	m.cancelling = false
+	m.snap = nil
+	m.lastSnap = nil
+	if m.activeInput == 0 {
+		m.urlInput.Focus()
+		m.keyInput.Blur()
+	} else {
+		m.urlInput.Blur()
+		m.keyInput.Focus()
+	}
+	return m
+}
+
+func (m urlUploadModel) startUpload() (urlUploadModel, tea.Cmd) {
+	shared := &sharedSnap{}
+	shared.ptr.Store(&progressSnapshot{phase: "uploading", total: m.resolved.BytesTotal, key: m.resolved.Key})
+	m.snap = shared
+	m.lastSnap = shared.ptr.Load()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.phase = urlUploadPhaseProgress
+	m.lastTime = time.Now()
+	m.cancelling = false
+	uploader, bucket, region, id, resolved, condition := m.aws, m.bucket, m.region, m.id, m.resolved, m.condition
+	run := func() tea.Msg {
+		defer cancel()
+		key, err := httpcopy.Run(ctx, uploader, httpcopy.Options{URL: resolved.URL, Bucket: bucket, Key: resolved.Key, Region: region, Conditional: true, Condition: condition, Progress: func(p httpcopy.Progress) {
+			shared.ptr.Store(&progressSnapshot{done: p.BytesDone, total: p.BytesTotal, phase: p.Phase, key: p.Filename})
+		}})
+		if err != nil {
+			if errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "cleanup failed") {
+				err = fmt.Errorf("cancelled")
+			}
+			return urlUploadErrMsg{ID: id, Err: err}
+		}
+		snap := shared.ptr.Load()
+		var bytes int64
+		if snap != nil {
+			bytes = snap.done
+		}
+		return urlUploadDoneMsg{ID: id, Key: key, Bytes: bytes}
+	}
+	return m, tea.Batch(m.spinner.Tick, run, tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg { return urlUploadProgressTickMsg{} }))
+}
+
 func (m urlUploadModel) updateProgress(msg tea.Msg) (urlUploadModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" {
+		if msg.String() == "ctrl+c" || msg.String() == "esc" {
+			m.cancelling = true
 			if m.cancel != nil {
 				m.cancel()
 			}
@@ -311,26 +414,43 @@ func (m urlUploadModel) View() string {
 		return m.viewInput()
 	case urlUploadPhaseProgress:
 		return m.viewProgress()
+	case urlUploadPhaseResolve:
+		label := "Resolving source and checking destination..."
+		if m.cancelling {
+			label = "Cancelling..."
+		}
+		return screenTitleStyle.Render("Upload from URL") + "\n" + m.spinner.View() + " " + label + "\n" + helpStyle.Render("[esc] Cancel")
+	case urlUploadPhaseReview:
+		s := screenTitleStyle.Render("Review upload") + "\n" + truncate("Destination: s3://"+m.bucket+"/"+m.resolved.Key, m.viewWidth()) + "\n"
+		if m.resolved.BytesTotal >= 0 {
+			s += "Size: " + formatSize(m.resolved.BytesTotal) + "\n"
+		}
+		if m.condition != nil {
+			s += "An object already exists at this destination.\n" + helpStyle.Render("[o] Overwrite  [r] Rename  [esc] Cancel")
+		} else {
+			s += helpStyle.Render("[enter] Upload  [r] Rename  [esc] Cancel")
+		}
+		return s
 	}
 	return ""
 }
 
 func (m urlUploadModel) viewInput() string {
-	s := breadcrumbStyle.Render(fmt.Sprintf("s3://%s/%s", m.bucket, m.prefix)) + "\n"
-	s += screenTitleStyle.Render("Upload from URL") + "\n"
-	s += separator(m.viewWidth()) + "\n\n"
-
-	s += "  " + urlUploadLabelStyle.Render("URL") + "\n"
-	s += "  " + m.urlInput.View() + "\n\n"
-
-	s += "  " + urlUploadLabelStyle.Render("S3 Key") + " " + dimStyle.Render("(optional)") + "\n"
-	s += "  " + m.keyInput.View() + "\n\n"
-
-	s += helpStyle.Render("  [enter] upload  [tab] switch field  [esc] cancel")
+	m.urlInput.Width = max(8, m.viewWidth()-4)
+	m.keyInput.Width = max(8, m.viewWidth()-4)
+	s := screenTitleStyle.Render("Upload from URL") + "\n"
+	s += truncate("Destination: s3://"+m.bucket+"/"+m.prefix, m.viewWidth()) + "\n"
+	s += "URL:\n" + m.urlInput.View() + "\n"
+	s += "Destination filename or path (optional):\n" + m.keyInput.View() + "\n"
+	if m.inputError != "" {
+		s += errorStyle.Render(truncate(m.inputError, m.viewWidth())) + "\n"
+	}
+	s += helpStyle.Render("enter: review destination  tab: next field  esc: cancel")
 	return s
 }
 
 func (m urlUploadModel) viewProgress() string {
+	m.bar.Width = max(8, m.viewWidth()-4)
 	snap := m.lastSnap
 	phase := "resolving"
 	key := ""
@@ -344,8 +464,12 @@ func (m urlUploadModel) viewProgress() string {
 		dest = fmt.Sprintf("s3://%s/%s", m.bucket, key)
 	}
 
-	s := breadcrumbStyle.Render(dest) + "\n"
-	s += screenTitleStyle.Render("Uploading…") + "\n"
+	s := breadcrumbStyle.Render(truncate(dest, m.viewWidth())) + "\n"
+	title := "Uploading..."
+	if m.cancelling {
+		title = "Cancelling..."
+	}
+	s += screenTitleStyle.Render(title) + "\n"
 	s += separator(m.viewWidth()) + "\n\n"
 
 	if phase == "resolving" {
@@ -357,19 +481,19 @@ func (m urlUploadModel) viewProgress() string {
 		}
 	}
 
-	s += helpStyle.Render("  [ctrl+c] cancel")
+	s += helpStyle.Render("  [esc / ctrl+c] cancel")
 	return s
 }
 
 // statusLine renders a human-readable progress description.
-// Format: "<done> / <total> (<pct>%) — <rate> — ETA <eta>"
-// When total is unknown: "<done> — <rate>"
+// Format: "<done> / <total> (<pct>%) - <rate> - ETA <eta>"
+// When total is unknown: "<done> - <rate>"
 func (m urlUploadModel) statusLine(snap *progressSnapshot) string {
 	done := formatSize(snap.done)
 	rate := progress.FormatRate(m.currentRate)
 
 	if snap.total <= 0 {
-		return dimStyle.Render(fmt.Sprintf("%s — %s", done, rate))
+		return dimStyle.Render(fmt.Sprintf("%s - %s", done, rate))
 	}
 
 	pct := float64(snap.done) / float64(snap.total) * 100
@@ -379,10 +503,10 @@ func (m urlUploadModel) statusLine(snap *progressSnapshot) string {
 	rateVal := progress.ParseRateBytesPerSec(rate)
 	if rateVal > 0 {
 		remaining := float64(snap.total-snap.done) / rateVal
-		eta = " — ETA " + progress.FormatDuration(time.Duration(remaining*float64(time.Second)))
+		eta = " - ETA " + progress.FormatDuration(time.Duration(remaining*float64(time.Second)))
 	}
 
-	return dimStyle.Render(fmt.Sprintf("%s / %s (%.0f%%) — %s%s", done, total, pct, rate, eta))
+	return dimStyle.Render(fmt.Sprintf("%s / %s (%.0f%%) - %s%s", done, total, pct, rate, eta))
 }
 
 func (m urlUploadModel) viewWidth() int {

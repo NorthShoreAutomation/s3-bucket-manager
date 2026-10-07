@@ -5,22 +5,23 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // --- Color Palette (Tokyo Night-inspired, boosted for readability) ---
 var (
-	colorPageTitle  = lipgloss.Color("#e0e6f5") // near-white titles
-	colorPrimary    = lipgloss.Color("#7aa2f7") // bright blue
-	colorText       = lipgloss.Color("#c8d0e8") // primary text — high contrast
-	colorMuted      = lipgloss.Color("#8690b2") // labels, help bar — readable but not loud
-	colorDim        = lipgloss.Color("#636d8c") // breadcrumb, zero counts — still visible
-	colorBorder     = lipgloss.Color("#4a5478") // separators, borders
-	colorHeaderBg   = lipgloss.Color("#232738") // header row shelf
-	colorSelectBg   = lipgloss.Color("#7aa2f7") // selected row bg
-	colorSelectFg   = lipgloss.Color("#1a1b26") // selected row text
-	colorSuccess    = lipgloss.Color("#73daca") // green for success messages
-	colorDanger     = lipgloss.Color("#f7768e") // red for errors
-	colorWarningTxt = lipgloss.Color("#e0af68") // warning text / public indicator
+	colorPageTitle  = lipgloss.AdaptiveColor{Light: "#172240", Dark: "#e0e6f5"} // near-white titles
+	colorPrimary    = lipgloss.AdaptiveColor{Light: "#2359a8", Dark: "#7aa2f7"} // bright blue
+	colorText       = lipgloss.AdaptiveColor{Light: "#24334b", Dark: "#c8d0e8"} // primary text - high contrast
+	colorMuted      = lipgloss.AdaptiveColor{Light: "#4c5870", Dark: "#a0aac4"} // labels, help bar - readable but not loud
+	colorDim        = lipgloss.AdaptiveColor{Light: "#59647a", Dark: "#a0aac4"} // breadcrumb, zero counts - still visible
+	colorBorder     = lipgloss.AdaptiveColor{Light: "#78849b", Dark: "#4a5478"} // separators, borders
+	colorHeaderBg   = lipgloss.AdaptiveColor{Light: "#e5eaf3", Dark: "#232738"} // header row shelf
+	colorSelectBg   = lipgloss.AdaptiveColor{Light: "#2359a8", Dark: "#7aa2f7"} // selected row bg
+	colorSelectFg   = lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#1a1b26"} // selected row text
+	colorSuccess    = lipgloss.AdaptiveColor{Light: "#08754f", Dark: "#73daca"} // green for success messages
+	colorDanger     = lipgloss.AdaptiveColor{Light: "#b12140", Dark: "#f7768e"} // red for errors
+	colorWarningTxt = lipgloss.AdaptiveColor{Light: "#8a5900", Dark: "#e0af68"} // warning text / public indicator
 )
 
 // --- Shared Styles ---
@@ -68,63 +69,35 @@ var (
 
 	dimStyle = lipgloss.NewStyle().
 			Foreground(colorDim)
-
-	// Legacy alias — used by users.go and access.go until they're updated
-	selectedStyle = lipgloss.NewStyle().
-			Foreground(colorPrimary).
-			Bold(true)
-
-	// Fixed column widths
-	colName    = 38
-	colRegion  = 13
-	colStatus  = 4
-	colCount   = 8
-	colSize    = 9
-	colCreated = 12
 )
-
-// --- Status Indicators ---
-
-func accessIcon(public bool) string {
-	if public {
-		return lipgloss.NewStyle().Foreground(colorWarningTxt).Render("\U0001F310") // globe
-	}
-	return dimStyle.Render("\U0001F512") // lock
-}
-
-func accessIconSelected(public bool) string {
-	if public {
-		return lipgloss.NewStyle().Foreground(colorWarningTxt).Render("\U0001F310")
-	}
-	return lipgloss.NewStyle().Foreground(colorSelectFg).Render("\U0001F512")
-}
 
 // --- Helpers ---
 
 func truncate(s string, maxLen int) string {
-	if len(s) > maxLen {
-		return s[:maxLen-1] + "…"
+	if maxLen <= 0 {
+		return ""
 	}
-	return s
+	return ansi.Truncate(s, maxLen, "…")
 }
 
 func pad(s string, width int) string {
-	if len(s) >= width {
-		return s[:width]
+	if width <= 0 {
+		return ""
 	}
-	return s + strings.Repeat(" ", width-len(s))
+	s = truncate(s, width)
+	return s + strings.Repeat(" ", max(0, width-ansi.StringWidth(s)))
 }
 
 func padRight(s string, width int) string {
-	if len(s) >= width {
+	if ansi.StringWidth(s) >= width {
 		return s
 	}
-	return strings.Repeat(" ", width-len(s)) + s
+	return strings.Repeat(" ", width-ansi.StringWidth(s)) + s
 }
 
 func formatCount(n int64) string {
 	if n == 0 {
-		return "—"
+		return "0"
 	}
 	if n < 1000 {
 		return fmt.Sprintf("%d", n)
@@ -148,13 +121,13 @@ func formatWithCommas(n int64) string {
 }
 
 func separator(width int) string {
-	line := strings.Repeat("─", width)
+	line := strings.Repeat("─", max(0, width))
 	return lipgloss.NewStyle().Foreground(colorBorder).Render(line)
 }
 
 func formatSize(bytes int64) string {
 	if bytes == 0 {
-		return "—"
+		return "0 B"
 	}
 	const (
 		kb = 1024
@@ -174,11 +147,4 @@ func formatSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
-}
-
-func publicURL(bucket, prefix string) string {
-	if prefix == "" {
-		return fmt.Sprintf("https://%s.s3.amazonaws.com/", bucket)
-	}
-	return fmt.Sprintf("https://%s.s3.amazonaws.com/%s", bucket, prefix)
 }

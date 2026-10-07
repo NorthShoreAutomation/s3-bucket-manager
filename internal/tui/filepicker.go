@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -14,178 +15,218 @@ type localFileItem struct {
 	name    string
 	isDir   bool
 	size    int64
-	modTime string // formatted "2006-01-02 15:04"
+	modTime string
 }
 
 type filePickerModel struct {
-	path   string          // current directory path
-	items  []localFileItem // directory contents
-	cursor int
-	offset int
-	width  int
-	height int
-	err    error
+	path                                 string
+	items, allItems                      []localFileItem
+	cursor, offset, width, height        int
+	err                                  error
+	filter                               string
+	filterActive, pathActive, showHidden bool
+	pathInput                            textinput.Model
 }
 
-func newFilePicker() filePickerModel {
-	cwd, _ := os.Getwd()
-	return filePickerModel{path: cwd}
-}
-
-// loadDir reads the directory at fp.path and populates fp.items.
+func newFilePicker() filePickerModel       { cwd, _ := os.Getwd(); return filePickerModel{path: cwd} }
+func (fp filePickerModel) ownsInput() bool { return fp.filterActive || fp.pathActive }
 func (fp filePickerModel) loadDir() filePickerModel {
+	fp.items = nil
+	fp.allItems = nil
+	fp.cursor = 0
+	fp.offset = 0
 	entries, err := os.ReadDir(fp.path)
 	if err != nil {
 		fp.err = err
 		return fp
 	}
-
-	fp.items = nil
-	// Directories first, then files, each sorted alphabetically
-	var dirs, files []localFileItem
 	for _, e := range entries {
-		// Skip hidden files
-		if strings.HasPrefix(e.Name(), ".") {
+		if !fp.showHidden && strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
+		info, infoErr := e.Info()
+		if infoErr != nil {
 			continue
 		}
-		item := localFileItem{
-			name:  e.Name(),
-			isDir: e.IsDir(),
-			size:  info.Size(),
-		}
+		item := localFileItem{name: e.Name(), isDir: e.IsDir(), size: info.Size()}
 		if !info.ModTime().IsZero() {
 			item.modTime = info.ModTime().Format("2006-01-02 15:04")
 		}
-		if e.IsDir() {
-			dirs = append(dirs, item)
-		} else {
-			files = append(files, item)
+		fp.allItems = append(fp.allItems, item)
+	}
+	sort.Slice(fp.allItems, func(i, j int) bool {
+		a, b := fp.allItems[i], fp.allItems[j]
+		if a.isDir != b.isDir {
+			return a.isDir
+		}
+		return strings.ToLower(a.name) < strings.ToLower(b.name)
+	})
+	fp.err = nil
+	return fp.applyFilter()
+}
+func (fp filePickerModel) applyFilter() filePickerModel {
+	fp.items = nil
+	for _, item := range fp.allItems {
+		if strings.Contains(strings.ToLower(item.name), strings.ToLower(fp.filter)) {
+			fp.items = append(fp.items, item)
 		}
 	}
-	sort.Slice(dirs, func(i, j int) bool { return dirs[i].name < dirs[j].name })
-	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
-	fp.items = append(dirs, files...)
 	fp.cursor = 0
 	fp.offset = 0
-	fp.err = nil
 	return fp
 }
-
 func (fp filePickerModel) visibleRows() int {
-	overhead := 6
-	avail := fp.height - overhead
-	if avail < 3 {
-		avail = 3
+	rows := fp.height - 9
+	if rows < 1 {
+		rows = 1
 	}
-	return avail
+	return rows
 }
-
-// update handles keys for the file picker. Returns the updated model,
-// a tea.Cmd, and a selectedFile path (non-empty when user picks a file).
 func (fp filePickerModel) update(msg tea.KeyMsg) (filePickerModel, tea.Cmd, string) {
+	if fp.pathActive {
+		switch msg.String() {
+		case "esc":
+			fp.pathActive = false
+			return fp, nil, ""
+		case "enter":
+			p := strings.TrimSpace(fp.pathInput.Value())
+			if p != "" {
+				if p == "~" || strings.HasPrefix(p, "~/") {
+					home, err := os.UserHomeDir()
+					if err == nil {
+						p = filepath.Join(home, strings.TrimPrefix(p, "~/"))
+						if fp.pathInput.Value() == "~" {
+							p = home
+						}
+					}
+				}
+				if !filepath.IsAbs(p) {
+					p = filepath.Join(fp.path, p)
+				}
+				fp.path = filepath.Clean(p)
+				fp.filter = ""
+				fp = fp.loadDir()
+			}
+			fp.pathActive = false
+			return fp, nil, ""
+		}
+		var cmd tea.Cmd
+		fp.pathInput, cmd = fp.pathInput.Update(msg)
+		return fp, cmd, ""
+	}
+	if fp.filterActive {
+		switch msg.String() {
+		case "esc":
+			fp.filter = ""
+			fp.filterActive = false
+			fp = fp.applyFilter()
+			return fp, nil, ""
+		case "enter":
+			fp.filterActive = false
+			return fp, nil, ""
+		case "backspace", "ctrl+h":
+			r := []rune(fp.filter)
+			if len(r) > 0 {
+				fp.filter = string(r[:len(r)-1])
+			}
+			fp = fp.applyFilter()
+			return fp, nil, ""
+		case "up", "down":
+		default:
+			if msg.Type == tea.KeyRunes {
+				fp.filter += string(msg.Runes)
+				fp = fp.applyFilter()
+			}
+			return fp, nil, ""
+		}
+	}
 	switch msg.String() {
+	case "/":
+		fp.filterActive = true
+	case "p":
+		fp.pathActive = true
+		fp.pathInput = textinput.New()
+		fp.pathInput.SetValue(fp.path)
+		fp.pathInput.Focus()
+		return fp, textinput.Blink, ""
+	case ".":
+		fp.showHidden = !fp.showHidden
+		fp = fp.loadDir()
 	case "up", "k":
 		if fp.cursor > 0 {
 			fp.cursor--
-			if fp.cursor < fp.offset {
-				fp.offset = fp.cursor
-			}
 		}
 	case "down", "j":
 		if fp.cursor < len(fp.items)-1 {
 			fp.cursor++
-			visible := fp.visibleRows()
-			if fp.cursor >= fp.offset+visible {
-				fp.offset = fp.cursor - visible + 1
-			}
 		}
-	case "right", "l":
-		// Enter directory
-		if fp.cursor < len(fp.items) && fp.items[fp.cursor].isDir {
-			fp.path = filepath.Join(fp.path, fp.items[fp.cursor].name)
-			fp = fp.loadDir()
-		}
+	case "pgup":
+		fp.cursor = max(0, fp.cursor-fp.visibleRows())
+	case "pgdown":
+		fp.cursor = max(0, min(len(fp.items)-1, fp.cursor+fp.visibleRows()))
 	case "left", "h":
-		// Go up one directory
 		parent := filepath.Dir(fp.path)
 		if parent != fp.path {
 			fp.path = parent
+			fp.filter = ""
 			fp = fp.loadDir()
 		}
-	case "enter":
-		// Select file for upload (only files, not dirs)
-		if fp.cursor < len(fp.items) && !fp.items[fp.cursor].isDir {
-			selected := filepath.Join(fp.path, fp.items[fp.cursor].name)
-			return fp, nil, selected
+	case "right", "l", "enter":
+		if fp.cursor >= 0 && fp.cursor < len(fp.items) {
+			item := fp.items[fp.cursor]
+			if item.isDir {
+				fp.path = filepath.Join(fp.path, item.name)
+				fp.filter = ""
+				fp = fp.loadDir()
+			} else if msg.String() == "enter" {
+				return fp, nil, filepath.Join(fp.path, item.name)
+			}
 		}
-		// If it's a directory, enter it
-		if fp.cursor < len(fp.items) && fp.items[fp.cursor].isDir {
-			fp.path = filepath.Join(fp.path, fp.items[fp.cursor].name)
-			fp = fp.loadDir()
-		}
-	case "esc":
-		// Signal cancel — caller checks mode
-		return fp, nil, ""
+	}
+	if fp.cursor < fp.offset {
+		fp.offset = fp.cursor
+	}
+	if fp.cursor >= fp.offset+fp.visibleRows() {
+		fp.offset = fp.cursor - fp.visibleRows() + 1
 	}
 	return fp, nil, ""
 }
-
-// view renders the file picker, matching the S3 browser's visual style.
 func (fp filePickerModel) view(detailWidth int) string {
-	s := breadcrumbStyle.Render("local > "+fp.path) + "\n"
-	s += screenTitleStyle.Render("Select file to upload") + "\n"
-	s += separator(detailWidth) + "\n"
-
+	width := max(12, detailWidth)
+	s := breadcrumbStyle.Render(truncate("local > "+fp.path, width)) + "\n" + screenTitleStyle.Render("Select file to upload") + "\n" + separator(width) + "\n"
+	if fp.pathActive {
+		s += "Path: " + fp.pathInput.View() + "\n"
+	} else {
+		s += fmt.Sprintf("Filter: %s  (%d of %d)\n", fp.filter, len(fp.items), len(fp.allItems))
+	}
 	if fp.err != nil {
-		s += "\n " + errorStyle.Render("Error: "+fp.err.Error()) + "\n"
-		s += "\n" + helpStyle.Render("  [\u2190] Back  [esc] Cancel")
-		return s
+		return s + errorStyle.Render(truncate("Cannot read folder: "+fp.err.Error(), width)) + "\n" + helpStyle.Render("[p] Enter path  [left] Parent  [esc] Cancel")
 	}
-
 	if len(fp.items) == 0 {
-		s += "\n " + dimStyle.Render("Empty directory.") + "\n"
-		s += "\n" + helpStyle.Render("  [\u2190] Back  [esc] Cancel")
-		return s
+		if fp.filter != "" {
+			s += dimStyle.Render("No matching files. Escape clears the filter.") + "\n"
+		} else {
+			s += dimStyle.Render("This folder has no visible files.") + "\n"
+		}
 	}
-
-	// Table header — same layout as S3 browser
-	header := fmt.Sprintf(" %s  %s  %s",
-		pad("NAME", 40), padRight("SIZE", 10), pad("MODIFIED", 20))
-	s += tableHeaderStyle.Width(detailWidth).Render(header) + "\n"
-
-	visible := fp.visibleRows()
-	end := fp.offset + visible
-	if end > len(fp.items) {
-		end = len(fp.items)
-	}
-	if fp.offset > 0 {
-		s += dimStyle.Render(fmt.Sprintf(" \u25b2 %d more above", fp.offset)) + "\n"
-	}
+	nameWidth := max(4, width-18)
+	s += tableHeaderStyle.Render(pad("NAME", nameWidth)+"  "+padRight("SIZE", 10)) + "\n"
+	end := min(len(fp.items), fp.offset+fp.visibleRows())
 	for i := fp.offset; i < end; i++ {
 		item := fp.items[i]
-		var icon, sz string
+		name := item.name
+		size := formatSize(item.size)
 		if item.isDir {
-			icon = "\U0001F4C1 "
-		} else {
-			icon = "   "
-			sz = formatSize(item.size)
+			name += "/"
+			size = "Folder"
 		}
-		display := icon + pad(item.name, 37)
-		row := fmt.Sprintf(" %s  %s  %s", display, padRight(sz, 10), pad(item.modTime, 20))
+		row := pad(truncate(name, nameWidth), nameWidth) + "  " + padRight(size, 10)
 		if i == fp.cursor {
-			s += rowSelectedStyle.Width(detailWidth).Render(row) + "\n"
+			s += rowSelectedStyle.Render(row) + "\n"
 		} else {
 			s += rowStyle.Render(row) + "\n"
 		}
 	}
-	if end < len(fp.items) {
-		s += dimStyle.Render(fmt.Sprintf(" \u25bc %d more below", len(fp.items)-end)) + "\n"
-	}
-
-	s += "\n" + helpStyle.Render("  [enter] Select file  [\u2192] Open folder  [\u2190] Back  [esc] Cancel")
+	s += helpStyle.Render(truncate("[enter] Select/open  [/] Filter  [p] Path  [.] Hidden  [esc] Cancel", width))
 	return s
 }
